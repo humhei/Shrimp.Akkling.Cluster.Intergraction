@@ -59,10 +59,6 @@ module RemoteActor =
 [<AutoOpen>]
 module private InternalTypes =
 
-
-
-    type UpdateClientsEvent<'ClientCallbackMsg> = UpdateClientsEvent of Map<Address, RemoteActor<'ClientCallbackMsg>>
-
     [<RequireQualifiedAccess>]
     type RemoteActorReachable =
         | Yes

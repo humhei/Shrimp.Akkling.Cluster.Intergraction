@@ -16,5 +16,6 @@ let main argv =
         }
         loop ()
     ) |> ignore
+    Console.Read()
     printfn "Hello World from F#!"
     0 // return an integer exit code

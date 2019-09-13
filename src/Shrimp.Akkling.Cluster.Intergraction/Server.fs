@@ -20,7 +20,7 @@ type ServerNodeActor<'CallbackMsg, 'ServerMsg> =
     abstract member Endpoints: Map<Address, RemoteActor<'CallbackMsg>> 
 
 
-type ServerNodeTypedContext<'CallbackMsg, 'ServerMsg, 'Actor when 'Actor :> ActorBase and 'Actor :> IWithUnboundedStash>(context : IActorContext, actor : 'Actor) = 
+type private ServerNodeTypedContext<'CallbackMsg, 'ServerMsg, 'Actor when 'Actor :> ActorBase and 'Actor :> IWithUnboundedStash>(context : IActorContext, actor : 'Actor) = 
     inherit TypedContext<'ServerMsg, 'Actor>(context, actor)
     let mutable endpoints = Map.empty
 
@@ -31,7 +31,7 @@ type ServerNodeTypedContext<'CallbackMsg, 'ServerMsg, 'Actor when 'Actor :> Acto
     interface ServerNodeActor<'CallbackMsg, 'ServerMsg> with 
         member x.Endpoints = endpoints
 
-type ServerNodeFunActor<'CallbackMsg, 'ServerMsg>(actor: ServerNodeActor<'CallbackMsg, 'ServerMsg> -> Effect<'ServerMsg>) as this =
+type private ServerNodeFunActor<'CallbackMsg, 'ServerMsg>(actor: ServerNodeActor<'CallbackMsg, 'ServerMsg> -> Effect<'ServerMsg>) as this =
     inherit Actor()
     let untypedContext = UntypedActor.Context :> IActorContext
     let ctx = ServerNodeTypedContext<'CallbackMsg ,'ServerMsg, ServerNodeFunActor<'CallbackMsg, 'ServerMsg>>(untypedContext, this)
@@ -246,10 +246,10 @@ type private ServerEndpointFunActor<'CallbackMsg, 'ServerMsg>(actor: ServerNodeA
 
 [<RequireQualifiedAccess>]
 module Server =
-    let inline nodeProps (receive: ServerNodeActor<'CallbackMsg, 'ServerMsg>->Effect<'ServerMsg>) : Props<'ServerMsg> = 
+    let nodeProps (receive: ServerNodeActor<'CallbackMsg, 'ServerMsg>->Effect<'ServerMsg>) : Props<'ServerMsg> = 
         Props<'ServerMsg>.Create<ServerNodeFunActor<'CallbackMsg, 'ServerMsg>, ServerNodeActor<'CallbackMsg, 'ServerMsg>, 'ServerMsg>(receive)
 
-    let inline internal endpointProps clientRoleName (receive: ServerNodeActor<'CallbackMsg, 'ServerMsg>->Effect<'ServerMsg>) : Props<'ServerMsg> = 
+    let internal endpointProps clientRoleName (receive: ServerNodeActor<'CallbackMsg, 'ServerMsg>->Effect<'ServerMsg>) : Props<'ServerMsg> = 
         Props<'ServerMsg>.ArgsCreate<ServerEndpointFunActor<'CallbackMsg, 'ServerMsg>, ServerNodeActor<'CallbackMsg, 'ServerMsg>, 'ServerMsg>([| receive; clientRoleName |])
 
 
@@ -267,8 +267,7 @@ type Server<'CallbackMsg, 'ServerMsg>
 
     let log = clusterSystem.Log
 
-    let actor =
-        spawn clusterSystem name (Server.endpointProps clientRoleName (receive))
+    let actor = spawn clusterSystem name (Server.endpointProps clientRoleName (receive))
 
     member x.Config = config
 
