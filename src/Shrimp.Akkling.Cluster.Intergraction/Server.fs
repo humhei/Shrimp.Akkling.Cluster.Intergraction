@@ -9,15 +9,15 @@ open System
 
 
 
-[<RequireQualifiedAccess>]
-type ServerNodeMsg =
-    | AddClient of RemoteActorIdentity
-    | RemoveClient of Address
-
-
 type ServerNodeActor<'CallbackMsg, 'ServerMsg> =
     inherit ExtActor<'ServerMsg>
     abstract member Endpoints: Map<Address, RemoteActor<'CallbackMsg>> 
+
+
+[<RequireQualifiedAccess>]
+type private ServerNodeMsg =
+    | AddClient of RemoteActorIdentity
+    | RemoveClient of Address
 
 
 type private ServerNodeTypedContext<'CallbackMsg, 'ServerMsg, 'Actor when 'Actor :> ActorBase and 'Actor :> IWithUnboundedStash>(context : IActorContext, actor : 'Actor) = 
@@ -261,7 +261,7 @@ type Server<'CallbackMsg, 'ServerMsg>
       setParams, 
       receive: ServerNodeActor<'CallbackMsg, 'ServerMsg> -> Effect<'ServerMsg> ) =
 
-    let config = Config.createClusterConfig [name] systemName remotePort seedPort setParams
+    let config = Configuration.createClusterConfig [name] systemName remotePort seedPort setParams
     
     let clusterSystem = System.create systemName config
 

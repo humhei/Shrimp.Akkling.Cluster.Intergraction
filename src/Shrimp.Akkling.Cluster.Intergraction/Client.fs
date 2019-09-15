@@ -450,7 +450,7 @@ module internal Client =
 
 
 type Client<'CallbackMsg,'ServerMsg>(systemName, name, serverRoleName, remotePort, seedPort, callback: Actor<'CallbackMsg> -> Effect<'CallbackMsg>, setParams) =
-    let clusterConfig: Config = Config.createClusterConfig [name] systemName remotePort seedPort setParams
+    let clusterConfig: Config = Configuration.createClusterConfig [name] systemName remotePort seedPort setParams
 
     let clusterSystem = System.create systemName clusterConfig
 

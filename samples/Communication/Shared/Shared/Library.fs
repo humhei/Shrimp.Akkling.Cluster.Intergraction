@@ -1,15 +1,15 @@
 ﻿module Shared
 
 open Akka.Configuration
-open Shrimp.Akkling.Cluster.Intergraction.Extensions
 open Shrimp.Akkling.Cluster.Intergraction
 open Akkling
+open Shrimp.Akkling.Cluster.Intergraction.Configuration
 
 type private AssemblyFinder = AssemblyFinder
 
 let private referenceConfig = 
     ConfigurationFactory.FromResource<AssemblyFinder>("Shared.reference.conf")
-    |> Config.fallBackByApplicationConf
+    |> Configuration.fallBackByApplicationConf
 
 let [<Literal>] private CLIENT_ROLE = "Client"
 let [<Literal>] private SERVER_ROLE = "Server"
@@ -18,7 +18,7 @@ let [<Literal>] private SYSTEM_NAME = "Shared"
 let private port = referenceConfig.GetInt("Shared.port")
 
 let private configurationSetParams (args: ClusterConfigBuildingArgs) =
-    {args with ``akka.loggers`` = Set.ofList [LoggerKind.NLog]}
+    {args with ``akka.loggers`` = Loggers (Set.ofList [Logger.Default])}
 
 [<RequireQualifiedAccess>]
 type ServerMsg =
