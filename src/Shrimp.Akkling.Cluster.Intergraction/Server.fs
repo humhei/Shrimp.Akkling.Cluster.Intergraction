@@ -3,15 +3,23 @@ open Akkling
 open Akka.Actor
 open Akka.Cluster
 open Akkling.Cluster
-open Extensions
 open Newtonsoft.Json.Linq
 open System
+open Shrimp.Akkling.Cluster.Intergraction.Configuration
+open System.Threading
 
+type ServerEndpointsUpdatedEvent<'CallbackMsg> = ServerEndpointsUpdatedEvent of Map<Address, RemoteActor<'CallbackMsg>>
 
 
 type ServerNodeActor<'CallbackMsg, 'ServerMsg> =
     inherit ExtActor<'ServerMsg>
-    abstract member Endpoints: Map<Address, RemoteActor<'CallbackMsg>> 
+    abstract member RespondSafely: responseBuilder: (unit -> obj) -> unit
+    abstract member RespondSafely: model: 'model * responseBuilder: (unit -> obj * 'model) -> 'model
+    abstract member NotifySafely: processMessage: (unit -> unit) -> unit
+    abstract member NotifySafely: model: 'model * processMessage: (unit -> 'model) -> 'model
+    abstract member Callback: 'CallbackMsg -> unit
+    abstract member EndpointsUpdated: Event<ServerEndpointsUpdatedEvent<'CallbackMsg>>
+    abstract member ClientJoinedManualReset: ManualResetEventSlim
 
 
 [<RequireQualifiedAccess>]
@@ -20,16 +28,101 @@ type private ServerNodeMsg =
     | RemoveClient of Address
 
 
+
 type private ServerNodeTypedContext<'CallbackMsg, 'ServerMsg, 'Actor when 'Actor :> ActorBase and 'Actor :> IWithUnboundedStash>(context : IActorContext, actor : 'Actor) = 
     inherit TypedContext<'ServerMsg, 'Actor>(context, actor)
-    let mutable endpoints = Map.empty
+    let mutable endpoints: Map<Address, RemoteActor<'CallbackMsg>>  = Map.empty
+    let serverEndpointsUpdatedEvent = new Event<_>()
+    let clientJoinedManualReset = new ManualResetEventSlim(false)
 
-    member internal x.SetEndpoints(value) = endpoints <- value 
 
-    member x.Endpoints = endpoints
+    member x.SetEndpoints(value) = 
+        endpoints <- value 
+
+        if value.Count > 0 && not clientJoinedManualReset.IsSet
+        then clientJoinedManualReset.Set()
+
+        serverEndpointsUpdatedEvent.Trigger(ServerEndpointsUpdatedEvent endpoints)
+
+    member x.GetEndpoints() = endpoints
 
     interface ServerNodeActor<'CallbackMsg, 'ServerMsg> with 
-        member x.Endpoints = endpoints
+
+        member x.EndpointsUpdated = serverEndpointsUpdatedEvent 
+
+        member x.ClientJoinedManualReset = clientJoinedManualReset
+
+        member x.RespondSafely(responseBuilder: unit -> obj) =
+            let ctx = (x :> ExtActor<_>)
+
+            try 
+                let response = responseBuilder()
+                (ctx.Sender()).Tell(response, untyped ctx.Self)
+
+            with ex ->
+                let errorMsg = ex.ToString()
+                ctx.Log.Value.Error(errorMsg)
+                if ex.GetType() = typeof<System.Exception>
+                then
+                    (ctx.Sender()).Tell(ErrorResponse.ServerText errorMsg, untyped ctx.Self)
+
+                else (ctx.Sender()).Tell(ErrorResponse.ServerException ex, untyped ctx.Self)
+
+
+        member x.RespondSafely(model, responseBuilder) =
+            let ctx = (x :> ExtActor<_>)
+
+            try 
+                let response, newModel = responseBuilder()
+                (ctx.Sender()).Tell(response, untyped ctx.Self)
+                newModel
+            with ex ->
+                let errorMsg = ex.ToString()
+                ctx.Log.Value.Error(errorMsg)
+                if ex.GetType() = typeof<System.Exception>
+                then
+                    (ctx.Sender()).Tell(ErrorResponse.ServerText errorMsg, untyped ctx.Self)
+
+                else (ctx.Sender()).Tell(ErrorResponse.ServerException ex, untyped ctx.Self)
+
+                model
+
+
+        member x.NotifySafely(processMessage) =
+            let ctx = (x :> ExtActor<_>)
+            try 
+                processMessage()
+            with ex ->
+                let errorMsg = ex.ToString()
+                ctx.Log.Value.Error(errorMsg)
+
+                if ex.GetType() = typeof<System.Exception>
+                then
+                    (ctx.Sender()).Tell(ErrorNotifycation.ServerText errorMsg, untyped ctx.Self)
+
+                else (ctx.Sender()).Tell(ErrorNotifycation.ServerException ex, untyped ctx.Self)
+
+        member x.NotifySafely(model, processMessage) =
+            let ctx = (x :> ExtActor<_>)
+            try 
+                processMessage()
+            with ex ->
+                let errorMsg = ex.ToString()
+                ctx.Log.Value.Error(errorMsg)
+                
+                if ex.GetType() = typeof<System.Exception>
+                then
+                    (ctx.Sender()).Tell(ErrorNotifycation.ServerText errorMsg, untyped ctx.Self)
+
+                else (ctx.Sender()).Tell(ErrorNotifycation.ServerException ex, untyped ctx.Self)
+
+                model
+
+        member x.Callback(callbackMsg) =
+            let ctx = (x :> ExtActor<_>)
+            for endpoint in endpoints do
+                (endpoint.Value :> ICanTell<_>).Tell(callbackMsg, untyped ctx.Self)
+
 
 type private ServerNodeFunActor<'CallbackMsg, 'ServerMsg>(actor: ServerNodeActor<'CallbackMsg, 'ServerMsg> -> Effect<'ServerMsg>) as this =
     inherit Actor()
@@ -39,6 +132,8 @@ type private ServerNodeFunActor<'CallbackMsg, 'ServerMsg>(actor: ServerNodeActor
     let log = untypedContext.System.Log
     let system = untypedContext.System
 
+    member x.GetEndpoints() = ctx.GetEndpoints()
+
     abstract member Next: current: Effect<'ServerMsg> * context: ServerNodeActor<'CallbackMsg, 'ServerMsg> * message: obj -> Effect<'ServerMsg>
 
     default __.Next (current : Effect<'ServerMsg>, _ : ServerNodeActor<'CallbackMsg, 'ServerMsg>, message : obj) : Effect<'ServerMsg> = 
@@ -46,15 +141,15 @@ type private ServerNodeFunActor<'CallbackMsg, 'ServerMsg>(actor: ServerNodeActor
         | :? ServerNodeMsg as serverNodeMsg ->
             match serverNodeMsg with
             | ServerNodeMsg.AddClient (clientIdentity) ->
-                match Map.tryFind clientIdentity.Address ctx.Endpoints with
+                match Map.tryFind clientIdentity.Address (ctx.GetEndpoints()) with
                 | Some _ -> current
                 | None ->
-                    ctx.SetEndpoints(ctx.Endpoints.Add(clientIdentity.Address, RemoteActor<_>.Create(system, clientIdentity)))
+                    ctx.SetEndpoints(ctx.GetEndpoints().Add(clientIdentity.Address, RemoteActor<_>.Create(system, clientIdentity)))
                     current
             | ServerNodeMsg.RemoveClient (address) ->
-                match Map.tryFind address ctx.Endpoints with 
+                match Map.tryFind address (ctx.GetEndpoints()) with 
                 | Some clientIdentity -> 
-                    ctx.SetEndpoints(ctx.Endpoints.Remove(address))
+                    ctx.SetEndpoints(ctx.GetEndpoints().Remove(address))
                     current
                 | None -> current
 
@@ -134,7 +229,7 @@ type private ServerMsgWrapper<'ServerMsg> = ServeerMsgWrapper of 'ServerMsg
 type private ServerEndpointFunActor<'CallbackMsg, 'ServerMsg>(actor: ServerNodeActor<'CallbackMsg, 'ServerMsg> -> Effect<'ServerMsg>, clientRoleName)  =
     inherit ServerNodeFunActor<'CallbackMsg, 'ServerMsg>(actor)
     override x.Next (current : Effect<'ServerMsg>, context : ServerNodeActor<'CallbackMsg, 'ServerMsg>, message : obj) : Effect<'ServerMsg> = 
-
+        
         let clusterSystem = context.System
 
         let log = clusterSystem.Log
@@ -145,7 +240,7 @@ type private ServerEndpointFunActor<'CallbackMsg, 'ServerMsg>(actor: ServerNodeA
         | :? EndpointMsg as endpointMsg ->
             match endpointMsg with 
             | EndpointMsg.AddClient clientIdentity ->
-                match Map.tryFind clientIdentity.Address context.Endpoints with
+                match Map.tryFind clientIdentity.Address (x.GetEndpoints()) with
                 | Some _ -> current
                 | None ->
                     let addClientMsg = ServerNodeMsg.AddClient clientIdentity
@@ -154,7 +249,7 @@ type private ServerEndpointFunActor<'CallbackMsg, 'ServerMsg>(actor: ServerNodeA
                     current
 
             | EndpointMsg.RemoveClient address ->
-                match Map.tryFind address context.Endpoints with 
+                match Map.tryFind address (x.GetEndpoints()) with 
                 | Some _ -> 
                     clusterSystem.EventStream.Publish(ServerNodeMsg.RemoveClient(address))
                     log.Info (sprintf "[SERVER] Remove Client %O" address)
@@ -208,7 +303,7 @@ type private ServerEndpointFunActor<'CallbackMsg, 'ServerMsg>(actor: ServerNodeA
             log.Info (sprintf "[SERVER] recieve msg %O" serverMsg)
             let sender = context.Sender()
 
-            match Map.tryFind sender.Path.Address context.Endpoints, sender.Path.Name = clientRoleName with 
+            match Map.tryFind sender.Path.Address (x.GetEndpoints()), sender.Path.Name = clientRoleName with 
             | Some _, true -> 
                 base.Self.Forward(ServeerMsgWrapper serverMsg)
                 current
@@ -253,6 +348,8 @@ module Server =
         Props<'ServerMsg>.ArgsCreate<ServerEndpointFunActor<'CallbackMsg, 'ServerMsg>, ServerNodeActor<'CallbackMsg, 'ServerMsg>, 'ServerMsg>([| receive; clientRoleName |])
 
 
+
+
 type Server<'CallbackMsg, 'ServerMsg>
     ( systemName, 
       name, 
@@ -268,6 +365,8 @@ type Server<'CallbackMsg, 'ServerMsg>
     let log = clusterSystem.Log
 
     let actor = spawn clusterSystem name (Server.endpointProps clientRoleName (receive))
+
+    member x.SystemName = systemName
 
     member x.Config = config
 

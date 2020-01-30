@@ -2,7 +2,48 @@
 open Akkling
 open Akka.Actor
 
-type ErrorResponse = ErrorResponse of string
+
+//type DummyResponse = DummyResponse
+[<RequireQualifiedAccess>]
+type SerializableOption<'T> =
+    | Some of 'T
+    | None
+[<RequireQualifiedAccess>]
+module SerializableOption =
+    let toOption = function
+        | SerializableOption.Some v -> Some v
+        | SerializableOption.None -> None
+
+
+[<RequireQualifiedAccess>]
+type ErrorResponse = 
+    | ServerText of string
+    | ServerException of System.Exception
+    | ClientText of string
+with 
+    override x.ToString() =
+        match x with 
+        | ErrorResponse.ServerText errorMsg -> errorMsg
+        | ErrorResponse.ServerException ex -> ex.ToString()
+        | ErrorResponse.ClientText errorMsg -> errorMsg
+
+type ErrorResponseException(errorResponse: ErrorResponse) =
+    inherit System.Exception()
+
+    member x.ErrorResponse = errorResponse
+
+    override x.ToString() = errorResponse.ToString()
+
+
+[<RequireQualifiedAccess>]
+type ErrorNotifycation =
+    | ServerText of string
+    | ServerException of System.Exception
+with 
+    override x.ToString() =
+        match x with 
+        | ErrorNotifycation.ServerText errorMsg -> errorMsg
+        | ErrorNotifycation.ServerException ex -> ex.ToString()
 
 type RemoteActorIdentity =
     { Address: Address 
@@ -24,6 +65,7 @@ type RemoteActor<'Msg> private (clusterSystem: ActorSystem, address: Address, ro
     member x.GetIdentity() = 
         { Role = role 
           Address = address }
+
 
     override x.Equals(yobj) =
         match yobj with
@@ -52,17 +94,19 @@ type RemoteActor<'Msg> private (clusterSystem: ActorSystem, address: Address, ro
 
 
 [<RequireQualifiedAccess>]
-module RemoteActor =
+module private RemoteActor =
     let retype (remoteActor: RemoteActor<_>) =
         RemoteActor<_>.Create(remoteActor.ClusterSystem, remoteActor.Address, remoteActor.Role)
+
+[<RequireQualifiedAccess>]
+type RemoteActorReachable =
+    | Yes
+    | No
 
 [<AutoOpen>]
 module private InternalTypes =
 
-    [<RequireQualifiedAccess>]
-    type RemoteActorReachable =
-        | Yes
-        | No
+
 
     [<RequireQualifiedAccess>]
     type EndpointMsg =
