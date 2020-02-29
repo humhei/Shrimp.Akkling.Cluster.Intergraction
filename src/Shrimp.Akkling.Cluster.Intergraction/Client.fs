@@ -14,6 +14,8 @@ open Shrimp.Akkling.Cluster.Intergraction.Configuration
 open Shrimp.Akkling.Cluster.Intergraction
 
 
+
+
 type ClientEndpointsUpdatedEvent = ClientEndpointsUpdatedEvent of Map<Address, RemoteActorReachable * RemoteActor<obj>>
 
 [<RequireQualifiedAccess>]
@@ -292,8 +294,12 @@ module internal Client =
                                 )
                             | None -> ()
 
+                            let msg = 
+                                { Guid = askingInfo.Guid 
+                                  ServerMsg = msg
+                                  JobTag = JobTag.Ask }
 
-                            remoteServer <! msg
+                            (remoteServer :> ICanTell<_>).Underlying.Tell(msg, untyped ctx.Self)
 
                             log.Info (sprintf "[CLIENT] Add ask task %O %O" askingInfo.RemoteActorAddress askingInfo.Guid)
 
@@ -302,10 +308,11 @@ module internal Client =
                         | :? ErrorNotifycation as errorNotifycation ->
                             errorNotifycationEvent.Trigger errorNotifycation
 
-                        | value -> 
+                        | :? ServerResponse as response -> 
 
-                            match askingInfos |> List.tryFindIndexBack (fun askingInfo -> askingInfo.RemoteActorAddress = sender.Path.Address), sender.Path.Name = serverRoleName with 
+                            match askingInfos |> List.tryFindIndexBack (fun askingInfo -> askingInfo.RemoteActorAddress = sender.Path.Address && askingInfo.Guid = response.Guid), sender.Path.Name = serverRoleName with 
                             | Some index, true ->
+                                let value = response.Response
                                 let askingInfo = askingInfos.[index]
                                 match askingInfo.Timer with 
                                 | Some timer -> 
@@ -322,6 +329,9 @@ module internal Client =
                             | _ ->
                                 log.Error (sprintf "[CLIENT] Unhandled message %O" msg)
                                 return Unhandled
+                        | _ -> 
+                            log.Error (sprintf "[CLIENT] Unhandled message %O" msg)
+                            return Unhandled
                     }
 
                     loop emptyAskingInfos
@@ -415,7 +425,11 @@ module internal Client =
 
                                 match job with 
                                 | RemoteJob.Tell msg -> 
-                                    (remoteServer :> ICanTell<_>).Tell(msg, untyped cancelableAskAgent)
+                                    let msg =
+                                        { ServerMsg = msg 
+                                          Guid = Guid.NewGuid()
+                                          JobTag = JobTag.Tell }
+                                    (remoteServer :> ICanTell<_>).Underlying.Tell(msg, untyped cancelableAskAgent)
                                     return! loop { model with JobCount = model.JobCount + 1}
 
                                 | RemoteJob.Ask (msg, timeSpan) ->
@@ -600,9 +614,9 @@ type Client<'CallbackMsg,'ServerMsg> (systemName, name, serverRoleName, remotePo
                                 | :? ErrorResponse as error ->
                                     match error with 
                                     | ErrorResponse.ClientText errorMsg
-                                    | ErrorResponse.ServerText errorMsg ->
+                                    | ErrorResponse.ServerText (_, errorMsg) ->
                                         log.Error ("[CLIENT]" + errorMsg)
-                                    | ErrorResponse.ServerException ex ->
+                                    | ErrorResponse.ServerException (_, ex) ->
                                         log.Error ("[CLIENT]" + ex.ToString())
 
                                     raise (ErrorResponseException(error))

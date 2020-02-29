@@ -1,13 +1,15 @@
 ﻿namespace Shrimp.Akkling.Cluster.Intergraction
 open Akkling
 open Akka.Actor
+open System
 
 
 //type DummyResponse = DummyResponse
-[<RequireQualifiedAccess>]
+[<RequireQualifiedAccess; Struct>]
 type SerializableOption<'T> =
     | Some of 'T
     | None
+
 [<RequireQualifiedAccess>]
 module SerializableOption =
     let toOption = function
@@ -15,17 +17,17 @@ module SerializableOption =
         | SerializableOption.None -> None
 
 
-[<RequireQualifiedAccess>]
+[<RequireQualifiedAccess; Struct>]
 type ErrorResponse = 
-    | ServerText of string
-    | ServerException of System.Exception
-    | ClientText of string
+    | ServerText of serverTextGuid: Guid * serverText: string
+    | ServerException of serverExpGuid: Guid * exp: System.Exception
+    | ClientText of clientText: string
 with 
     override x.ToString() =
         match x with 
-        | ErrorResponse.ServerText errorMsg -> errorMsg
-        | ErrorResponse.ServerException ex -> ex.ToString()
-        | ErrorResponse.ClientText errorMsg -> errorMsg
+        | ErrorResponse.ServerText (_, errorMsg) -> errorMsg
+        | ErrorResponse.ServerException (_, ex) -> ex.ToString()
+        | ErrorResponse.ClientText (errorMsg) -> errorMsg
 
 type ErrorResponseException(errorResponse: ErrorResponse) =
     inherit System.Exception()
@@ -34,17 +36,23 @@ type ErrorResponseException(errorResponse: ErrorResponse) =
 
     override x.ToString() = errorResponse.ToString()
 
+[<Struct>]
+type ServerResponse =
+    { Response: obj
+      Guid: System.Guid }
 
-[<RequireQualifiedAccess>]
+
+[<RequireQualifiedAccess; Struct>]
 type ErrorNotifycation =
-    | ServerText of string
-    | ServerException of System.Exception
+    | ServerText of text: string
+    | ServerException of exp: System.Exception
 with 
     override x.ToString() =
         match x with 
         | ErrorNotifycation.ServerText errorMsg -> errorMsg
         | ErrorNotifycation.ServerException ex -> ex.ToString()
 
+[<Struct>]
 type RemoteActorIdentity =
     { Address: Address 
       Role: string }
@@ -114,7 +122,17 @@ module private InternalTypes =
         | AddClient of RemoteActorIdentity
         | RemoveClient of Address
 
+    type JobTag =
+        | Ask = 0 
+        | Tell = 1
 
+    [<Struct>]
+    type JobToken =
+        { Guid: System.Guid
+          JobTag: JobTag }
+
+    [<Struct>]
     type ServerMsgToken<'ServerMsg> =
         { ServerMsg: 'ServerMsg
-          Guid: System.Guid }
+          Guid: System.Guid
+          JobTag: JobTag }
