@@ -11,6 +11,8 @@ open Akka.Event
 open Extensions
 open Akka.Configuration
 open Shrimp.Akkling.Cluster.Intergraction.Configuration
+open Shrimp.Akkling.Cluster.Intergraction
+
 
 type ClientEndpointsUpdatedEvent = ClientEndpointsUpdatedEvent of Map<Address, RemoteActorReachable * RemoteActor<obj>>
 
@@ -369,7 +371,6 @@ module internal Client =
 
                         | :? RemoteJob<'ServerMsg> as job ->
                             let endpoints = model.Endpoints
-
                             if endpoints.Count = 0 then 
                                 match job with 
                                 | RemoteJob.Tell _  ->
@@ -479,7 +480,7 @@ module internal Client =
 
             actor
 
-type RacingManualResetSetReason =
+type private RacingManualResetSetReason =
     | Set = 0
     | TimeElapsed = 1
 
@@ -487,6 +488,8 @@ type private RacingManualReset(interval: float) =
     
 
     let masterManualReset = new ManualResetEventSlim(false)
+
+    let sencondardManualReset = new ManualResetEventSlim(false)
 
     let mutable whySet = RacingManualResetSetReason.Set
 
@@ -506,9 +509,14 @@ type private RacingManualReset(interval: float) =
         return f whySet
     }
 
-    member x.ManualReset = masterManualReset
+    member x.ManualReset = sencondardManualReset
 
-    member x.Set() = masterManualReset.Set()
+    member x.Set() = 
+        whySet <- RacingManualResetSetReason.Set
+        masterManualReset.Set()
+        sencondardManualReset.Set()
+
+    member x.SetReason = whySet
 
     member x.IsSet = masterManualReset.IsSet
 
@@ -534,8 +542,12 @@ type Client<'CallbackMsg,'ServerMsg> (systemName, name, serverRoleName, remotePo
 
     do endpointsUpdatedEvent.Publish.Add(fun m ->
         let (ClientEndpointsUpdatedEvent m) = m
-        if m.Count > 0 && not serverJoinedRacingManualReset.IsSet
-        then serverJoinedRacingManualReset.Set()
+        if m.Count > 0
+        then 
+            match serverJoinedRacingManualReset.IsSet, serverJoinedRacingManualReset.SetReason with 
+            | false, _ -> serverJoinedRacingManualReset.Set()
+            | true, RacingManualResetSetReason.TimeElapsed -> serverJoinedRacingManualReset.Set()
+            | _ -> ()
     )
 
     let callbackActor = spawnAnonymous clusterSystem (props callbackReceive)
@@ -548,7 +560,11 @@ type Client<'CallbackMsg,'ServerMsg> (systemName, name, serverRoleName, remotePo
 
     member x.EndpointsUpdatedEvent = endpointsUpdatedEvent
 
-    member x.ServerJoinedManualReset = serverJoinedRacingManualReset.ManualReset
+    member x.WarmUp(f) =
+        async {
+            serverJoinedRacingManualReset.ManualReset.Wait()
+            f()
+        } |> Async.Start
 
     member x.ClusterConfig = clusterConfig
 
@@ -565,8 +581,10 @@ type Client<'CallbackMsg,'ServerMsg> (systemName, name, serverRoleName, remotePo
                 | RacingManualResetSetReason.Set ->
                         let rec retry countAccum =
 
+
+
                             let result: Result<obj, ErrorResponse> = 
-                                jobSchedulerAgent <? (RemoteJob.Ask (msg, timespanOp))
+                                jobSchedulerAgent <? RemoteJob.Ask (msg, timespanOp)
                                 |> Async.RunSynchronously
 
                             match result with 
@@ -603,7 +621,7 @@ type Client<'CallbackMsg,'ServerMsg> (systemName, name, serverRoleName, remotePo
             serverJoinedRacingManualReset.DoUntilSetted(fun reason ->
                 match reason with 
                 | RacingManualResetSetReason.Set -> jobSchedulerAgent <! (RemoteJob.Tell arg1)
-                | RacingManualResetSetReason.TimeElapsed -> (failwith "Service unavailable, try again later.")
+                | RacingManualResetSetReason.TimeElapsed -> log.Warning  "Service unavailable, try again later."
             ) |> Async.Start
             
 

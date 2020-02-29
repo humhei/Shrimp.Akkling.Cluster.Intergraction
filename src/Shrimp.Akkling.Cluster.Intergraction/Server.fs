@@ -19,7 +19,6 @@ type ServerNodeActor<'CallbackMsg, 'ServerMsg> =
     abstract member NotifySafely: model: 'model * processMessage: (unit -> 'model) -> 'model
     abstract member Callback: 'CallbackMsg -> unit
     abstract member EndpointsUpdated: Event<ServerEndpointsUpdatedEvent<'CallbackMsg>>
-    abstract member ClientJoinedManualReset: ManualResetEventSlim
 
 
 [<RequireQualifiedAccess>]
@@ -33,14 +32,10 @@ type private ServerNodeTypedContext<'CallbackMsg, 'ServerMsg, 'Actor when 'Actor
     inherit TypedContext<'ServerMsg, 'Actor>(context, actor)
     let mutable endpoints: Map<Address, RemoteActor<'CallbackMsg>>  = Map.empty
     let serverEndpointsUpdatedEvent = new Event<_>()
-    let clientJoinedManualReset = new ManualResetEventSlim(false)
 
 
     member x.SetEndpoints(value) = 
         endpoints <- value 
-
-        if value.Count > 0 && not clientJoinedManualReset.IsSet
-        then clientJoinedManualReset.Set()
 
         serverEndpointsUpdatedEvent.Trigger(ServerEndpointsUpdatedEvent endpoints)
 
@@ -49,8 +44,6 @@ type private ServerNodeTypedContext<'CallbackMsg, 'ServerMsg, 'Actor when 'Actor
     interface ServerNodeActor<'CallbackMsg, 'ServerMsg> with 
 
         member x.EndpointsUpdated = serverEndpointsUpdatedEvent 
-
-        member x.ClientJoinedManualReset = clientJoinedManualReset
 
         member x.RespondSafely(responseBuilder: unit -> obj) =
             let ctx = (x :> ExtActor<_>)
@@ -341,8 +334,6 @@ type private ServerEndpointFunActor<'CallbackMsg, 'ServerMsg>(actor: ServerNodeA
 
 [<RequireQualifiedAccess>]
 module Server =
-    let nodeProps (receive: ServerNodeActor<'CallbackMsg, 'ServerMsg>->Effect<'ServerMsg>) : Props<'ServerMsg> = 
-        Props<'ServerMsg>.Create<ServerNodeFunActor<'CallbackMsg, 'ServerMsg>, ServerNodeActor<'CallbackMsg, 'ServerMsg>, 'ServerMsg>(receive)
 
     let internal endpointProps clientRoleName (receive: ServerNodeActor<'CallbackMsg, 'ServerMsg>->Effect<'ServerMsg>) : Props<'ServerMsg> = 
         Props<'ServerMsg>.ArgsCreate<ServerEndpointFunActor<'CallbackMsg, 'ServerMsg>, ServerNodeActor<'CallbackMsg, 'ServerMsg>, 'ServerMsg>([| receive; clientRoleName |])

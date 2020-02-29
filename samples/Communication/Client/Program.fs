@@ -9,15 +9,22 @@ open System.Threading
 let main argv =
     let client = Client.create()
 
-    let result: int = 
-        client <? ServerMsg.Plus (1, 2)
-        |> Async.RunSynchronously
+    client.WarmUp(fun _ ->
+        let result = 
+            client <? ServerMsg.Plus (1, 2)
 
-    for i = 1 to 1000 do 
-        client <? ServerMsg.Plus (1, 2)
-        |> Async.RunSynchronously
-        |> ignore
+        let result2: int = 
+            client <? ServerMsg.Plus (1, 2)
+            |> Async.RunSynchronously
+        ()
+    )
 
-    let b = result = 3
+
+
+    //let result2 = 
+    //    client <? ServerMsg.Plus (1, 2)
+    //    |> Async.RunSynchronously
+
+    Console.Read()
     printfn "Hello World from F#!"
     0 // return an integer exit code

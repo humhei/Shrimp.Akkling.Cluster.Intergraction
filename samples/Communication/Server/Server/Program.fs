@@ -11,8 +11,9 @@ let main argv =
             let! msg = ctx.Receive()
             match msg with 
             | ServerMsg.Plus (input1, input2) ->
-                let sender = ctx.Sender()
-                sender <! input1 + input2
+                ctx.RespondSafely(fun _ ->
+                    box (input1 + input2)
+                )
         }
         loop ()
     ) |> ignore
