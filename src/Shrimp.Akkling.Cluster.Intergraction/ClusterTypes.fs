@@ -107,10 +107,14 @@ type RemoteActorReachable =
 module private InternalTypes =
 
 
-
     [<RequireQualifiedAccess>]
     type EndpointMsg =
         | AddServer of RemoteActorIdentity
         | RemoveServer of Address
         | AddClient of RemoteActorIdentity
         | RemoveClient of Address
+
+
+    type ServerMsgToken<'ServerMsg> =
+        { ServerMsg: 'ServerMsg
+          Guid: System.Guid }
