@@ -19,14 +19,15 @@ module SerializableOption =
 
 [<RequireQualifiedAccess; Struct>]
 type ErrorResponse = 
-    | ServerText of serverTextGuid: Guid * serverText: string
-    | ServerException of serverExpGuid: Guid * exp: System.Exception
+    | ServerText of serverText: string
+    | ServerException of exp: System.Exception
     | ClientText of clientText: string
+
 with 
     override x.ToString() =
         match x with 
-        | ErrorResponse.ServerText (_, errorMsg) -> errorMsg
-        | ErrorResponse.ServerException (_, ex) -> ex.ToString()
+        | ErrorResponse.ServerText (errorMsg) -> errorMsg
+        | ErrorResponse.ServerException (ex) -> ex.ToString()
         | ErrorResponse.ClientText (errorMsg) -> errorMsg
 
 type ErrorResponseException(errorResponse: ErrorResponse) =
@@ -37,7 +38,7 @@ type ErrorResponseException(errorResponse: ErrorResponse) =
     override x.ToString() = errorResponse.ToString()
 
 [<Struct>]
-type ServerResponse =
+type private ServerResponse =
     { Response: obj
       Guid: System.Guid }
 

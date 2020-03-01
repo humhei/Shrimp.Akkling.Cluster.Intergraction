@@ -14,6 +14,10 @@ let main argv =
                 ctx.RespondSafely(fun _ ->
                     box (input1 + input2)
                 )
+            | ServerMsg.WarmUp ->
+                ctx.NotifySafely(fun _ ->
+                    ()
+                )
         }
         loop ()
     ) |> ignore

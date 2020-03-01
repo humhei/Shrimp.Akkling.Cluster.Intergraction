@@ -24,8 +24,15 @@ let main argv =
     let client = Client.create()
 
     client.WarmUp(fun _ ->
+
+        let m = client <! ServerMsg.WarmUp
+
         let result = 
             client <! ServerMsg.Plus (5, 7)
+
+        let result2: int = 
+            client <? ServerMsg.Plus (1, 2)
+            |> Async.RunSynchronously
 
         let result2: int = 
             client <? ServerMsg.Plus (1, 2)

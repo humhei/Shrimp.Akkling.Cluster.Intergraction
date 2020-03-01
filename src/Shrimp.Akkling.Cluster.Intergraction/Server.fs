@@ -14,7 +14,6 @@ open System.Threading
 
 type ServerEndpointsUpdatedEvent<'CallbackMsg> = ServerEndpointsUpdatedEvent of Map<Address, RemoteActor<'CallbackMsg>>
 
-
 type ServerNodeActor<'CallbackMsg, 'ServerMsg> =
     inherit ExtActor<'ServerMsg>
     abstract member RespondSafely: responseBuilder: (unit -> obj) -> unit
@@ -55,11 +54,12 @@ type private ServerNodeTypedContext<'CallbackMsg, 'ServerMsg, 'Actor when 'Actor
         member x.EndpointsUpdated = serverEndpointsUpdatedEvent 
 
         member x.RespondSafely(responseBuilder: unit -> obj) =
-            let token = tokenQueue.Dequeue()
+            let token = tokenQueue.Peek()
             match token.JobTag with 
             | JobTag.Tell -> 
                 (x :> ServerNodeActor<_ , _>).NotifySafely(responseBuilder >> ignore)
             | JobTag.Ask ->
+                tokenQueue.Dequeue() |> ignore
                 let ctx = (x :> ExtActor<_>)
 
                 try 
@@ -71,18 +71,25 @@ type private ServerNodeTypedContext<'CallbackMsg, 'ServerMsg, 'Actor when 'Actor
                     ctx.Log.Value.Error(errorMsg)
                     if ex.GetType() = typeof<System.Exception>
                     then
-                        (ctx.Sender()).Tell(ErrorResponse.ServerText (token.Guid, errorMsg), untyped ctx.Self)
+                        let response =
+                            { Response = ErrorResponse.ServerText (errorMsg) 
+                              Guid = token.Guid }
+                        (ctx.Sender()).Tell(response, untyped ctx.Self)
 
-                    else (ctx.Sender()).Tell(ErrorResponse.ServerException (token.Guid, ex), untyped ctx.Self)
-
+                    else 
+                        let response =
+                            { Response = ErrorResponse.ServerException (ex)
+                              Guid = token.Guid }
+                        (ctx.Sender()).Tell(response, untyped ctx.Self)
 
         member x.RespondSafely(model, responseBuilder) =
-            let token = tokenQueue.Dequeue()
+            let token = tokenQueue.Peek()
             match token.JobTag with 
             | JobTag.Tell -> 
                 (x :> ServerNodeActor<_ , _>).NotifySafely(responseBuilder >> ignore)
                 model
             | JobTag.Ask ->
+                tokenQueue.Dequeue() |> ignore
                 let ctx = (x :> ExtActor<_>)
 
                 try 
@@ -95,43 +102,62 @@ type private ServerNodeTypedContext<'CallbackMsg, 'ServerMsg, 'Actor when 'Actor
                     ctx.Log.Value.Error(errorMsg)
                     if ex.GetType() = typeof<System.Exception>
                     then
-                        (ctx.Sender()).Tell(ErrorResponse.ServerText (token.Guid, errorMsg), untyped ctx.Self)
+                        let response =
+                            { Response = ErrorResponse.ServerText (errorMsg) 
+                              Guid = token.Guid }
+                        (ctx.Sender()).Tell(response, untyped ctx.Self)
 
-                    else (ctx.Sender()).Tell(ErrorResponse.ServerException (token.Guid, ex), untyped ctx.Self)
+                    else 
+                        let response =
+                            { Response = ErrorResponse.ServerException (ex)
+                              Guid = token.Guid }
+                        (ctx.Sender()).Tell(response, untyped ctx.Self)
 
                     model
 
 
 
         member x.NotifySafely(processMessage) =
-            let ctx = (x :> ExtActor<_>)
-            try 
-                processMessage()
-            with ex ->
-                let errorMsg = ex.ToString()
-                ctx.Log.Value.Error(errorMsg)
+            let token = tokenQueue.Dequeue()
+            match token.JobTag with 
+            | JobTag.Tell -> 
+                let ctx = (x :> ExtActor<_>)
+                try 
+                    processMessage()
+                with ex ->
+                    let errorMsg = ex.ToString()
+                    ctx.Log.Value.Error(errorMsg)
 
-                if ex.GetType() = typeof<System.Exception>
-                then
-                    (ctx.Sender()).Tell(ErrorNotifycation.ServerText errorMsg, untyped ctx.Self)
+                    if ex.GetType() = typeof<System.Exception>
+                    then
+                        (ctx.Sender()).Tell(ErrorNotifycation.ServerText errorMsg, untyped ctx.Self)
 
-                else (ctx.Sender()).Tell(ErrorNotifycation.ServerException ex, untyped ctx.Self)
+                    else (ctx.Sender()).Tell(ErrorNotifycation.ServerException ex, untyped ctx.Self)
+
+            | JobTag.Ask ->
+                failwith "asking job should processed by response safely"
 
         member x.NotifySafely(model, processMessage) =
-            let ctx = (x :> ExtActor<_>)
-            try 
-                processMessage()
-            with ex ->
-                let errorMsg = ex.ToString()
-                ctx.Log.Value.Error(errorMsg)
+            let token = tokenQueue.Dequeue()
+            match token.JobTag with 
+            | JobTag.Tell ->
+                let ctx = (x :> ExtActor<_>)
+                try 
+                    processMessage()
+                with ex ->
+                    let errorMsg = ex.ToString()
+                    ctx.Log.Value.Error(errorMsg)
                 
-                if ex.GetType() = typeof<System.Exception>
-                then
-                    (ctx.Sender()).Tell(ErrorNotifycation.ServerText errorMsg, untyped ctx.Self)
+                    if ex.GetType() = typeof<System.Exception>
+                    then
+                        (ctx.Sender()).Tell(ErrorNotifycation.ServerText errorMsg, untyped ctx.Self)
 
-                else (ctx.Sender()).Tell(ErrorNotifycation.ServerException ex, untyped ctx.Self)
+                    else (ctx.Sender()).Tell(ErrorNotifycation.ServerException ex, untyped ctx.Self)
 
-                model
+                    model
+
+            | JobTag.Ask ->
+                failwith "asking job should processed by response safely"
 
         member x.Callback(callbackMsg) =
             let ctx = (x :> ExtActor<_>)

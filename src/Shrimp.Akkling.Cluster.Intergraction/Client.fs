@@ -614,9 +614,9 @@ type Client<'CallbackMsg,'ServerMsg> (systemName, name, serverRoleName, remotePo
                                 | :? ErrorResponse as error ->
                                     match error with 
                                     | ErrorResponse.ClientText errorMsg
-                                    | ErrorResponse.ServerText (_, errorMsg) ->
+                                    | ErrorResponse.ServerText (errorMsg) ->
                                         log.Error ("[CLIENT]" + errorMsg)
-                                    | ErrorResponse.ServerException (_, ex) ->
+                                    | ErrorResponse.ServerException (ex) ->
                                         log.Error ("[CLIENT]" + ex.ToString())
 
                                     raise (ErrorResponseException(error))
@@ -626,7 +626,7 @@ type Client<'CallbackMsg,'ServerMsg> (systemName, name, serverRoleName, remotePo
                         retry 0
 
 
-                | RacingManualResetSetReason.TimeElapsed -> (failwith "Service unavailable, try again later.")
+                | RacingManualResetSetReason.TimeElapsed -> (failwithf "Service unavailable, try again later. %O" msg)
             )
 
 
@@ -635,7 +635,7 @@ type Client<'CallbackMsg,'ServerMsg> (systemName, name, serverRoleName, remotePo
             serverJoinedRacingManualReset.DoUntilSetted(fun reason ->
                 match reason with 
                 | RacingManualResetSetReason.Set -> jobSchedulerAgent <! (RemoteJob.Tell arg1)
-                | RacingManualResetSetReason.TimeElapsed -> log.Warning  "Service unavailable, try again later."
+                | RacingManualResetSetReason.TimeElapsed -> log.Warning  (sprintf "Service unavailable, try again later. %O" arg1)
             ) |> Async.Start
             
 
