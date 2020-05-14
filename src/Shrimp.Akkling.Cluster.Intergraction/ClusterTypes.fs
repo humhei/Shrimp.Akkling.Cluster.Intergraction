@@ -16,6 +16,9 @@ module SerializableOption =
         | SerializableOption.Some v -> Some v
         | SerializableOption.None -> None
 
+    let ofOption = function
+        | Some v -> SerializableOption.Some v
+        | None -> SerializableOption.None
 
 [<RequireQualifiedAccess; Struct>]
 type ErrorResponse = 
@@ -112,6 +115,7 @@ type RemoteActorReachable =
     | Yes
     | No
 
+
 [<AutoOpen>]
 module private InternalTypes =
 
@@ -123,17 +127,9 @@ module private InternalTypes =
         | AddClient of RemoteActorIdentity
         | RemoveClient of Address
 
-    type JobTag =
-        | Ask = 0 
-        | Tell = 1
+
 
     [<Struct>]
-    type JobToken =
-        { Guid: System.Guid
-          JobTag: JobTag }
-
-    [<Struct>]
-    type ServerMsgToken<'ServerMsg> =
+    type ServerMsgAskingToken<'ServerMsg> =
         { ServerMsg: 'ServerMsg
-          Guid: System.Guid
-          JobTag: JobTag }
+          Guid: System.Guid }

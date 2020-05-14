@@ -23,6 +23,7 @@ let private configurationSetParams (args: ClusterConfigBuildingArgs) =
 [<RequireQualifiedAccess>]
 type ServerMsg =
     | Plus of input1: int * input2: int
+    | Plus2 of input1: int * input2: int
     | WarmUp
 
 

@@ -14,15 +14,38 @@ open System.Threading
 
 type ServerEndpointsUpdatedEvent<'CallbackMsg> = ServerEndpointsUpdatedEvent of Map<Address, RemoteActor<'CallbackMsg>>
 
+
+type ServerSender<'Response> internal (sender: IActorRef<'Response>, self, queue: Queue<Guid>) =
+
+    member x.Path = sender.Path
+
+    interface ICanTell<'Response> with 
+        member x.Ask(message, timeSpan) =
+            failwith "Server sender cannot perform an asking "
+
+        member x.Tell(message, _) =
+            let message = 
+                let count = queue.Count
+                if count = 0 
+                then box message
+                elif count = 1 
+                then
+                    let token = queue.Dequeue()
+                    { Response = message 
+                      Guid = token }
+                    |> box
+                else failwith "Invalid token"
+
+            sender.Underlying.Tell(message, self)
+
+        member x.Underlying = sender.Underlying
+
 type ServerNodeActor<'CallbackMsg, 'ServerMsg> =
     inherit ExtActor<'ServerMsg>
-    abstract member RespondSafely: responseBuilder: (unit -> obj) -> unit
-    abstract member RespondSafely: model: 'model * responseBuilder: (unit -> obj * 'model) -> 'model
-    abstract member NotifySafely: processMessage: (unit -> unit) -> unit
-    abstract member NotifySafely: model: 'model * processMessage: (unit -> 'model) -> 'model
     abstract member Callback: 'CallbackMsg -> unit
     abstract member EndpointsUpdated: Event<ServerEndpointsUpdatedEvent<'CallbackMsg>>
-
+    abstract member Sender: unit -> ServerSender<'Response>
+    abstract member Self: unit
 
 
 [<RequireQualifiedAccess>]
@@ -35,16 +58,40 @@ type private ServerNodeMsg =
 type private ServerNodeTypedContext<'CallbackMsg, 'ServerMsg, 'Actor when 'Actor :> ActorBase and 'Actor :> IWithUnboundedStash>(context : IActorContext, actor : 'Actor) = 
     inherit TypedContext<'ServerMsg, 'Actor>(context, actor)
     let mutable endpoints: Map<Address, RemoteActor<'CallbackMsg>>  = Map.empty
+    let log = context.System.Log
+
     let serverEndpointsUpdatedEvent = new Event<_>()
 
-    let tokenQueue = Queue<_>()
+    let askingTokenQueue = Queue<_>()
 
-    member x.SetCurrentToken(token: JobToken) =
-        tokenQueue.Enqueue(token)
+    member x.Sender() =
+        let x = x :> Actor<_>
+        ServerSender(x.Sender(), untyped x.Self, (askingTokenQueue))
+
+    member x.ProcessException(ex: Exception) =
+        let errorMsg = ex.ToString()
+        log.Error errorMsg
+        let count = askingTokenQueue.Count
+        if ex.GetType() = typeof<System.Exception>
+        then
+            if count = 1
+            then x.Sender() <! ErrorResponse.ServerText (errorMsg) 
+            elif count = 0 
+            then x.Sender() <! ErrorNotifycation.ServerText (errorMsg) 
+            else failwith "Invalid token"
+        else 
+            if count = 1
+            then x.Sender() <! ErrorResponse.ServerException (ex) 
+            elif count = 0 
+            then x.Sender() <! ErrorNotifycation.ServerException (ex) 
+            else failwith "Invalid token"
+
+
+    member x.EnqueueAskingToken(token: Guid) =
+        askingTokenQueue.Enqueue(token)
 
     member x.SetEndpoints(value) = 
         endpoints <- value 
-
         serverEndpointsUpdatedEvent.Trigger(ServerEndpointsUpdatedEvent endpoints)
 
     member x.GetEndpoints() = endpoints
@@ -53,117 +100,16 @@ type private ServerNodeTypedContext<'CallbackMsg, 'ServerMsg, 'Actor when 'Actor
 
         member x.EndpointsUpdated = serverEndpointsUpdatedEvent 
 
-        member x.RespondSafely(responseBuilder: unit -> obj) =
-            let token = tokenQueue.Peek()
-            match token.JobTag with 
-            | JobTag.Tell -> 
-                (x :> ServerNodeActor<_ , _>).NotifySafely(responseBuilder >> ignore)
-            | JobTag.Ask ->
-                tokenQueue.Dequeue() |> ignore
-                let ctx = (x :> ExtActor<_>)
-
-                try 
-                    let response = responseBuilder()
-                    (ctx.Sender()).Tell({ Guid = token.Guid; Response = response}, untyped ctx.Self)
-
-                with ex ->
-                    let errorMsg = ex.ToString()
-                    ctx.Log.Value.Error(errorMsg)
-                    if ex.GetType() = typeof<System.Exception>
-                    then
-                        let response =
-                            { Response = ErrorResponse.ServerText (errorMsg) 
-                              Guid = token.Guid }
-                        (ctx.Sender()).Tell(response, untyped ctx.Self)
-
-                    else 
-                        let response =
-                            { Response = ErrorResponse.ServerException (ex)
-                              Guid = token.Guid }
-                        (ctx.Sender()).Tell(response, untyped ctx.Self)
-
-        member x.RespondSafely(model, responseBuilder) =
-            let token = tokenQueue.Peek()
-            match token.JobTag with 
-            | JobTag.Tell -> 
-                (x :> ServerNodeActor<_ , _>).NotifySafely(responseBuilder >> ignore)
-                model
-            | JobTag.Ask ->
-                tokenQueue.Dequeue() |> ignore
-                let ctx = (x :> ExtActor<_>)
-
-                try 
-                    let response, newModel = responseBuilder()
-                    (ctx.Sender()).Tell({ Guid = token.Guid; Response = response}, untyped ctx.Self)
-                    newModel
-
-                with ex ->
-                    let errorMsg = ex.ToString()
-                    ctx.Log.Value.Error(errorMsg)
-                    if ex.GetType() = typeof<System.Exception>
-                    then
-                        let response =
-                            { Response = ErrorResponse.ServerText (errorMsg) 
-                              Guid = token.Guid }
-                        (ctx.Sender()).Tell(response, untyped ctx.Self)
-
-                    else 
-                        let response =
-                            { Response = ErrorResponse.ServerException (ex)
-                              Guid = token.Guid }
-                        (ctx.Sender()).Tell(response, untyped ctx.Self)
-
-                    model
-
-
-
-        member x.NotifySafely(processMessage) =
-            let token = tokenQueue.Dequeue()
-            match token.JobTag with 
-            | JobTag.Tell -> 
-                let ctx = (x :> ExtActor<_>)
-                try 
-                    processMessage()
-                with ex ->
-                    let errorMsg = ex.ToString()
-                    ctx.Log.Value.Error(errorMsg)
-
-                    if ex.GetType() = typeof<System.Exception>
-                    then
-                        (ctx.Sender()).Tell(ErrorNotifycation.ServerText errorMsg, untyped ctx.Self)
-
-                    else (ctx.Sender()).Tell(ErrorNotifycation.ServerException ex, untyped ctx.Self)
-
-            | JobTag.Ask ->
-                failwith "asking job should processed by response safely"
-
-        member x.NotifySafely(model, processMessage) =
-            let token = tokenQueue.Dequeue()
-            match token.JobTag with 
-            | JobTag.Tell ->
-                let ctx = (x :> ExtActor<_>)
-                try 
-                    processMessage()
-                with ex ->
-                    let errorMsg = ex.ToString()
-                    ctx.Log.Value.Error(errorMsg)
-                
-                    if ex.GetType() = typeof<System.Exception>
-                    then
-                        (ctx.Sender()).Tell(ErrorNotifycation.ServerText errorMsg, untyped ctx.Self)
-
-                    else (ctx.Sender()).Tell(ErrorNotifycation.ServerException ex, untyped ctx.Self)
-
-                    model
-
-            | JobTag.Ask ->
-                failwith "asking job should processed by response safely"
+        member x.Sender() = x.Sender()
 
         member x.Callback(callbackMsg) =
             let ctx = (x :> ExtActor<_>)
             for endpoint in endpoints do
                 (endpoint.Value :> ICanTell<_>).Tell(callbackMsg, untyped ctx.Self)
 
+        member x.Self = 
+            failwith "Invalid opertor"
+            ()
 
 type private ServerNodeFunActor<'CallbackMsg, 'ServerMsg>(actor: ServerNodeActor<'CallbackMsg, 'ServerMsg> -> Effect<'ServerMsg>) as this =
     inherit Actor()
@@ -173,29 +119,29 @@ type private ServerNodeFunActor<'CallbackMsg, 'ServerMsg>(actor: ServerNodeActor
     let log = untypedContext.System.Log
     let system = untypedContext.System
 
-    member x.SetCurrentToken(token) = ctx.SetCurrentToken(token)
+    member x.EnqueueAskingToken(token) = ctx.EnqueueAskingToken(token)
+
+    member internal x.ProcessServerNodeMsg(serverNodeMsg) =
+        match serverNodeMsg with
+        | ServerNodeMsg.AddClient (clientIdentity) ->
+            match Map.tryFind clientIdentity.Address (ctx.GetEndpoints()) with
+            | Some _ -> ()
+            | None -> ctx.SetEndpoints(ctx.GetEndpoints().Add(clientIdentity.Address, RemoteActor<_>.Create(system, clientIdentity)))
+        | ServerNodeMsg.RemoveClient (address) ->
+            match Map.tryFind address (ctx.GetEndpoints()) with 
+            | Some clientIdentity -> 
+                ctx.SetEndpoints(ctx.GetEndpoints().Remove(address))
+            | None -> ()
 
     member x.GetEndpoints() = ctx.GetEndpoints()
 
     abstract member Next: current: Effect<'ServerMsg> * context: ServerNodeActor<'CallbackMsg, 'ServerMsg> * message: obj -> Effect<'ServerMsg>
 
-    default __.Next (current : Effect<'ServerMsg>, _ : ServerNodeActor<'CallbackMsg, 'ServerMsg>, message : obj) : Effect<'ServerMsg> = 
+    default x.Next (current : Effect<'ServerMsg>, _ : ServerNodeActor<'CallbackMsg, 'ServerMsg>, message : obj) : Effect<'ServerMsg> = 
         match message with
         | :? ServerNodeMsg as serverNodeMsg ->
-            match serverNodeMsg with
-            | ServerNodeMsg.AddClient (clientIdentity) ->
-                match Map.tryFind clientIdentity.Address (ctx.GetEndpoints()) with
-                | Some _ -> current
-                | None ->
-                    ctx.SetEndpoints(ctx.GetEndpoints().Add(clientIdentity.Address, RemoteActor<_>.Create(system, clientIdentity)))
-                    current
-            | ServerNodeMsg.RemoveClient (address) ->
-                match Map.tryFind address (ctx.GetEndpoints()) with 
-                | Some clientIdentity -> 
-                    ctx.SetEndpoints(ctx.GetEndpoints().Remove(address))
-                    current
-                | None -> current
-
+            x.ProcessServerNodeMsg(serverNodeMsg)
+            current
         | :? LifecycleEvent -> 
             // we don't treat unhandled lifecycle events as casual unhandled messages
             current
@@ -226,13 +172,21 @@ type private ServerNodeFunActor<'CallbackMsg, 'ServerMsg>(actor: ServerNodeActor
                         | :? Become<'ServerMsg> -> behavior <- eff
                         | effect -> effect.OnApplied(ctx, msg :?> 'ServerMsg)
                         () } |> Async.StartAsTask
-                upcast task ))
+                upcast task )
+            )
 
         | effect -> effect.OnApplied(ctx, msg :?> 'ServerMsg)
 
 
     member this.Handle (msg: obj) = 
-        let nextBehavior = this.Next (behavior, ctx, msg)
+        let nextBehavior = 
+            try 
+                this.Next (behavior, ctx, msg)
+            with ex ->
+                ctx.ProcessException(ex)
+
+                upcast Ignore
+
         this.HandleNextBehavior(msg, nextBehavior)
     
     member __.Sender() : IActorRef = base.Sender
@@ -267,12 +221,13 @@ type private ServerNodeFunActor<'CallbackMsg, 'ServerMsg>(actor: ServerNodeActor
 
 
 
-type private ServerMsgWrapper<'ServerMsg> = ServerMsgWrapper of 'ServerMsg
 
 type private ServerEndpointFunActor<'CallbackMsg, 'ServerMsg>(actor: ServerNodeActor<'CallbackMsg, 'ServerMsg> -> Effect<'ServerMsg>, clientRoleName)  =
     inherit ServerNodeFunActor<'CallbackMsg, 'ServerMsg>(actor)
     override x.Next (current : Effect<'ServerMsg>, context : ServerNodeActor<'CallbackMsg, 'ServerMsg>, message : obj) : Effect<'ServerMsg> = 
         
+        let actorContext = (context :> Actor<_>)
+
         let clusterSystem = context.System
 
         let log = clusterSystem.Log
@@ -307,13 +262,13 @@ type private ServerEndpointFunActor<'CallbackMsg, 'ServerMsg>(actor: ServerNodeA
         | LifecycleEvent e ->
             match e with
             | PreStart ->
-                cluster.Subscribe(untyped context.Self, ClusterEvent.InitialStateAsEvents,
+                cluster.Subscribe(untyped actorContext.Self, ClusterEvent.InitialStateAsEvents,
                     [| typedefof<ClusterEvent.IMemberEvent> |])
-                log.Info (sprintf "Actor subscribed to Cluster status updates: %O" context.Self)
+                log.Info (sprintf "Actor subscribed to Cluster status updates: %O" actorContext.Self)
                 current
             | PostStop ->
-                cluster.Unsubscribe(untyped context.Self)
-                log.Info (sprintf "Actor unsubscribed from Cluster status updates: %O" context.Self)
+                cluster.Unsubscribe(untyped actorContext.Self)
+                log.Info (sprintf "Actor unsubscribed from Cluster status updates: %O" actorContext.Self)
                 current
             | _ -> current
 
@@ -342,28 +297,26 @@ type private ServerEndpointFunActor<'CallbackMsg, 'ServerMsg>(actor: ServerNodeA
 
             current
 
-        | :? ServerMsgToken<'ServerMsg> as token ->
-            x.SetCurrentToken(
-                { Guid = token.Guid 
-                  JobTag = token.JobTag }
-            )
-            base.Self.Forward(token.ServerMsg)
-            current
-
-        | :? 'ServerMsg as serverMsg ->
-            log.Info (sprintf "[SERVER] recieve msg %O" serverMsg)
+        | :? ServerMsgAskingToken<'ServerMsg> as token ->
+            log.Info (sprintf "[SERVER] recieve msg %O" token)
+            x.EnqueueAskingToken(token.Guid)
             let sender = context.Sender()
-
             match Map.tryFind sender.Path.Address (x.GetEndpoints()), sender.Path.Name = clientRoleName with 
             | Some _, true -> 
-                base.Self.Forward(ServerMsgWrapper serverMsg)
-                current
+                match current with
+                | :? Become<'ServerMsg> as become -> 
+                    become.Next token.ServerMsg
 
+                | _ -> current
 
             | None, true ->
-                clusterSystem.EventStream.Publish(ServerNodeMsg.AddClient { Address = sender.Path.Address; Role = clientRoleName }) 
-                base.Self.Forward(ServerMsgWrapper serverMsg)
-                current
+                base.ProcessServerNodeMsg(ServerNodeMsg.AddClient { Address = sender.Path.Address; Role = clientRoleName })
+                match current with
+                | :? Become<'ServerMsg> as become -> 
+                    become.Next token.ServerMsg
+
+                | _ -> current
+
 
             | _, false -> 
                 log.Error (sprintf "[SERVER] Unknown remote client %O" sender.Path.Address )
@@ -372,21 +325,17 @@ type private ServerEndpointFunActor<'CallbackMsg, 'ServerMsg>(actor: ServerNodeA
         | :? ServerNodeMsg ->
             base.Next (current, context, message)
 
-        | :? ServerMsgWrapper<'ServerMsg> as keep ->
-            match current with
-            | :? Become<'ServerMsg> as become -> 
-                let (ServerMsgWrapper serverMsg) = keep
-                become.Next serverMsg
-            | _ -> current
+        | :? 'ServerMsg ->
+            base.Next (current, context, message)
+
         | _ ->
             log.Error (sprintf "[SERVER] Unknown message %O" message )
             base.Next (current, context, message)
 
     override x.HandleNextBehavior(msg: obj, nextBehavior) =
         match msg with 
-        | :? ServerMsgWrapper<'ServerMsg> as keep ->
-            let (ServerMsgWrapper msg) = keep 
-            base.HandleNextBehavior(msg, nextBehavior)
+        | :? ServerMsgAskingToken<'ServerMsg> as token ->
+            base.HandleNextBehavior(token.ServerMsg, nextBehavior)
         | _ -> base.HandleNextBehavior(msg, nextBehavior)
         
 

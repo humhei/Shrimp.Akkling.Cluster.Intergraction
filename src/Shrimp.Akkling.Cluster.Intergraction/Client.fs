@@ -234,7 +234,7 @@ module internal Client =
 
                                 expiredInfo.Sender <! Response.MemberRemoved expiredInfo.RemoteActorAddress
                                     
-                                log.Info (sprintf "[CLIENT] Remove ask tasks after member %O removed" expiredInfo.RemoteActorAddress)
+                                log.Info (sprintf "[CLIENT] [CancelableAsk] Remove ask tasks after member %O removed" expiredInfo.RemoteActorAddress)
                                     
                             return! loop guaranteedInfos
 
@@ -245,14 +245,14 @@ module internal Client =
                                     remoteActorManager <! EndpointMsg.AddServer { Address = sender.Path.Address; Role = serverRoleName }
 
                                 callbackActor <! callback
-                            | None -> log.Error (sprintf "Cannot find a callback actor to process %O" callback)
+                            | None -> log.Error (sprintf "[CLIENT] [CancelableAsk] Cannot find a callback actor to process %O" callback)
 
 
                         | :? EndpointMsg as endpointMsg ->
                             remoteActorManager <<! endpointMsg
 
                         | :? Timeout<'ServerMsg> as timeout ->
-                            log.Info (sprintf "[CLIENT] Ask task timeout: %O" timeout)
+                            log.Info (sprintf "[CLIENT] [CancelableAsk] Ask task timeout: %O" timeout)
                             let (Timeout (askingInfo)) = timeout
 
                             match askingInfos |> List.tryFindIndex (fun askingInfo0 -> askingInfo0.Guid = askingInfo.Guid) with 
@@ -263,10 +263,10 @@ module internal Client =
 
                                 askingInfo.Sender <! Response.Timeout
 
-                                log.Info (sprintf "[CLIENT] Remove ask task %O %O after timeout" askingInfo.RemoteActorAddress askingInfo.Guid)
+                                log.Info (sprintf "[CLIENT] [CancelableAsk] Remove ask task %O %O after timeout" askingInfo.RemoteActorAddress askingInfo.Guid)
                                 return! loop (askingInfos.[0..index - 1] @ askingInfos.[index + 1..askingInfos.Length - 1])
                             | _ ->
-                                log.Error "[CLIENT] Timeout, but the ask task has been already removed"
+                                log.Error "[CLIENT] [CancelableAsk] Timeout, but the ask task has been already removed"
 
 
                         | :? Msg<'ServerMsg> as msg ->
@@ -296,12 +296,13 @@ module internal Client =
 
                             let msg = 
                                 { Guid = askingInfo.Guid 
-                                  ServerMsg = msg
-                                  JobTag = JobTag.Ask }
+                                  ServerMsg = msg }
+
 
                             (remoteServer :> ICanTell<_>).Underlying.Tell(msg, untyped ctx.Self)
+                            //(remoteServer :> ICanTell<_>).Underlying.Tell(msg, untyped ctx.Self)
 
-                            log.Info (sprintf "[CLIENT] Add ask task %O %O" askingInfo.RemoteActorAddress askingInfo.Guid)
+                            log.Info (sprintf "[CLIENT] [CancelableAsk] Add ask task %O %O" askingInfo.RemoteActorAddress askingInfo.Guid)
 
                             return! loop (askingInfo :: askingInfos)
 
@@ -320,17 +321,17 @@ module internal Client =
                                     timer.Dispose()
                                 | None -> ()
 
-                                log.Info (sprintf "[CLIENT] Receive response %O from remote server %O \n of %O" value sender.Path.Address askingInfo.ServerMsg)
+                                log.Info (sprintf "[CLIENT] [CancelableAsk] Receive response %O from remote server %O \n of %O" value sender.Path.Address askingInfo.ServerMsg)
                                 remoteActorManager <! EndpointMsg.AddServer { Address = askingInfo.RemoteActorAddress; Role = serverRoleName }
                                 askingInfo.Sender <! Response.Success value
 
                                 return! loop (askingInfos.[0..index - 1] @ askingInfos.[index + 1..askingInfos.Length - 1])
 
                             | _ ->
-                                log.Error (sprintf "[CLIENT] Unhandled message %O" msg)
+                                log.Error (sprintf "[CLIENT] [CancelableAsk] Unhandled message %O" msg)
                                 return Unhandled
                         | _ -> 
-                            log.Error (sprintf "[CLIENT] Unhandled message %O" msg)
+                            log.Error (sprintf "[CLIENT] [CancelableAsk] Unhandled message %O" msg)
                             return Unhandled
                     }
 
@@ -389,7 +390,7 @@ module internal Client =
                                 | RemoteJob.Ask _ ->
                                     log.Warning(sprintf "Service unavailable, try again later. %O" receivedMsg)
                                     let error =  
-                                        (sprintf "Service unavailable, try again later. %O" receivedMsg)
+                                        (sprintf "[Client] [JobScheduler] Service unavailable, try again later. %O" receivedMsg)
                                         |> ErrorResponse.ClientText
                                         |> Result.Error
                                     ctx.Sender() <! error
@@ -425,10 +426,6 @@ module internal Client =
 
                                 match job with 
                                 | RemoteJob.Tell msg -> 
-                                    let msg =
-                                        { ServerMsg = msg 
-                                          Guid = Guid.NewGuid()
-                                          JobTag = JobTag.Tell }
                                     (remoteServer :> ICanTell<_>).Underlying.Tell(msg, untyped cancelableAskAgent)
                                     return! loop { model with JobCount = model.JobCount + 1}
 
@@ -453,7 +450,7 @@ module internal Client =
                                     match result with 
                                     | CancelableAsk.Response.Unreachable addr ->
                                         let result: Result<obj, ErrorResponse> = 
-                                            (sprintf "Please make sure remote seed node is reachable, And manully send a 5s timed task to reconnect to remote seed node")
+                                            (sprintf "[Client] [JobScheduler] Please make sure remote seed node is reachable, And manully send a 5s timed task to reconnect to remote seed node")
                                             |> ErrorResponse.ClientText
                                             |> Result.Error
                                         let sender = ctx.Sender()
@@ -462,6 +459,7 @@ module internal Client =
 
                                     | CancelableAsk.Response.Success result ->
                                         let result: Result<obj, ErrorResponse> = Result.Ok result
+
                                         ctx.Sender() <! result
                                         return! loop { model with JobCount = model.JobCount + 1}
 
@@ -474,18 +472,18 @@ module internal Client =
                                         let result: Result<obj, ErrorResponse> = 
                                             match reachable with 
                                             | RemoteActorReachable.No ->
-                                                (sprintf "Remote server unreachable, the ask request doesn't get response in 5s, try again later")
+                                                (sprintf "[Client] [JobScheduler] Remote server unreachable, the ask request doesn't get response in 5s, try again later")
                                                 |> ErrorResponse.ClientText
                                                 |> Result.Error
                                             | RemoteActorReachable.Yes ->
-                                                (sprintf "Time out %A" timeSpan)
+                                                (sprintf "[Client] [JobScheduler] Time out %A" timeSpan)
                                                 |> ErrorResponse.ClientText
                                                 |> Result.Error
                                         ctx.Sender() <! result
                                         return! loop { model with JobCount = model.JobCount + 1}
 
                         | _ -> 
-                            log.Error (sprintf "[CLIENT] unexcepted msg %O" receivedMsg)
+                            log.Error (sprintf "[Client] [JobScheduler] unexcepted msg %O" receivedMsg)
                             return Unhandled
                     }
                     loop { JobCount = 0; Endpoints = Map.empty }
@@ -593,40 +591,40 @@ type Client<'CallbackMsg,'ServerMsg> (systemName, name, serverRoleName, remotePo
             serverJoinedRacingManualReset.DoUntilSetted(fun reason ->
                 match reason with 
                 | RacingManualResetSetReason.Set ->
-                        let rec retry countAccum =
+                    let rec retry countAccum =
+
+                        let result: Result<obj, ErrorResponse> = 
+                            jobSchedulerAgent <? RemoteJob.Ask (msg, timespanOp)
+                            |> Async.RunSynchronously
+
+                        match result with 
+                        | Result.Error error -> 
+                            if countAccum >= retryCount then 
+                                raise (ErrorResponseException(error))
+                            else 
+                                Thread.Sleep(retryTimeInterval)
+                                retry (countAccum + 1)
+
+                        | Result.Ok ok -> 
+                            match ok with 
+                            | :? ErrorResponse as error ->
+                                match error with 
+                                | ErrorResponse.ClientText errorMsg
+                                | ErrorResponse.ServerText (errorMsg) ->
+                                    log.Error ("[CLIENT]" + errorMsg)
+                                | ErrorResponse.ServerException (ex) ->
+                                    log.Error ("[CLIENT]" + ex.ToString())
+
+                                raise (ErrorResponseException(error))
+
+                            | _ -> unbox ok
+
+                    retry 0
 
 
-
-                            let result: Result<obj, ErrorResponse> = 
-                                jobSchedulerAgent <? RemoteJob.Ask (msg, timespanOp)
-                                |> Async.RunSynchronously
-
-                            match result with 
-                            | Result.Error error -> 
-                                if countAccum >= retryCount then 
-                                    raise (ErrorResponseException(error))
-                                else 
-                                    Thread.Sleep(retryTimeInterval)
-                                    retry (countAccum + 1)
-
-                            | Result.Ok ok -> 
-                                match ok with 
-                                | :? ErrorResponse as error ->
-                                    match error with 
-                                    | ErrorResponse.ClientText errorMsg
-                                    | ErrorResponse.ServerText (errorMsg) ->
-                                        log.Error ("[CLIENT]" + errorMsg)
-                                    | ErrorResponse.ServerException (ex) ->
-                                        log.Error ("[CLIENT]" + ex.ToString())
-
-                                    raise (ErrorResponseException(error))
-
-                                | _ -> unbox ok
-
-                        retry 0
-
-
-                | RacingManualResetSetReason.TimeElapsed -> (failwithf "Service unavailable, try again later. %O" msg)
+                | RacingManualResetSetReason.TimeElapsed -> 
+                    let error = ErrorResponse.ClientText (sprintf  "[Client] RacingManualResetSetReason.TimeElapsed Service unavailable, try again later. %O" msg)
+                    raise (ErrorResponseException error)
             )
 
 
