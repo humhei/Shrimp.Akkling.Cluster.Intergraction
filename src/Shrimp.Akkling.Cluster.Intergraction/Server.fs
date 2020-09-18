@@ -1,37 +1,117 @@
 ﻿namespace Shrimp.Akkling.Cluster.Intergraction
+
+open System.Collections.Generic
+
+#nowarn "0104"
 open Akkling
 open Akka.Actor
 open Akka.Cluster
 open Akkling.Cluster
-open Extensions
 open Newtonsoft.Json.Linq
 open System
+open Shrimp.Akkling.Cluster.Intergraction.Configuration
+open System.Threading
 
+type ServerEndpointsUpdatedEvent<'CallbackMsg> = ServerEndpointsUpdatedEvent of Map<Address, RemoteActor<'CallbackMsg>>
+
+
+type ServerSender<'Response> internal (sender: IActorRef<'Response>, self, queue: Queue<Guid>) =
+
+    member x.Path = sender.Path
+
+    interface ICanTell<'Response> with 
+        member x.Ask(message, timeSpan) =
+            failwith "Server sender cannot perform an asking "
+
+        member x.Tell(message, _) =
+            let message = 
+                let count = queue.Count
+                if count = 0 
+                then box message
+                elif count = 1 
+                then
+                    let token = queue.Dequeue()
+                    { Response = message 
+                      Guid = token }
+                    |> box
+                else failwith "Invalid token"
+
+            sender.Underlying.Tell(message, self)
+
+        member x.Underlying = sender.Underlying
+
+type ServerNodeActor<'CallbackMsg, 'ServerMsg> =
+    inherit ExtActor<'ServerMsg>
+    abstract member Callback: 'CallbackMsg -> unit
+    abstract member EndpointsUpdated: Event<ServerEndpointsUpdatedEvent<'CallbackMsg>>
+    abstract member Sender: unit -> ServerSender<'Response>
+    abstract member Self: unit
 
 
 [<RequireQualifiedAccess>]
-type ServerNodeMsg =
+type private ServerNodeMsg =
     | AddClient of RemoteActorIdentity
     | RemoveClient of Address
 
 
-type ServerNodeActor<'CallbackMsg, 'ServerMsg> =
-    inherit ExtActor<'ServerMsg>
-    abstract member Endpoints: Map<Address, RemoteActor<'CallbackMsg>> 
 
-
-type ServerNodeTypedContext<'CallbackMsg, 'ServerMsg, 'Actor when 'Actor :> ActorBase and 'Actor :> IWithUnboundedStash>(context : IActorContext, actor : 'Actor) = 
+type private ServerNodeTypedContext<'CallbackMsg, 'ServerMsg, 'Actor when 'Actor :> ActorBase and 'Actor :> IWithUnboundedStash>(context : IActorContext, actor : 'Actor) = 
     inherit TypedContext<'ServerMsg, 'Actor>(context, actor)
-    let mutable endpoints = Map.empty
+    let mutable endpoints: Map<Address, RemoteActor<'CallbackMsg>>  = Map.empty
+    let log = context.System.Log
 
-    member internal x.SetEndpoints(value) = endpoints <- value 
+    let serverEndpointsUpdatedEvent = new Event<_>()
 
-    member x.Endpoints = endpoints
+    let askingTokenQueue = Queue<_>()
+
+    member x.Sender() =
+        let x = x :> Actor<_>
+        ServerSender(x.Sender(), untyped x.Self, (askingTokenQueue))
+
+    member x.ProcessException(ex: Exception) =
+        let errorMsg = ex.ToString()
+        log.Error errorMsg
+        let count = askingTokenQueue.Count
+        if ex.GetType() = typeof<System.Exception>
+        then
+            if count = 1
+            then x.Sender() <! ErrorResponse.ServerText (errorMsg) 
+            elif count = 0 
+            then x.Sender() <! ErrorNotifycation.ServerText (errorMsg) 
+            else failwith "Invalid token"
+        else 
+            if count = 1
+            then x.Sender() <! ErrorResponse.ServerException (ex) 
+            elif count = 0 
+            then x.Sender() <! ErrorNotifycation.ServerException (ex) 
+            else failwith "Invalid token"
+
+
+    member x.EnqueueAskingToken(token: Guid) =
+        askingTokenQueue.Enqueue(token)
+
+    member x.SetEndpoints(value) = 
+        endpoints <- value 
+        serverEndpointsUpdatedEvent.Trigger(ServerEndpointsUpdatedEvent endpoints)
+
+    member x.GetEndpoints() = endpoints
 
     interface ServerNodeActor<'CallbackMsg, 'ServerMsg> with 
-        member x.Endpoints = endpoints
 
-type ServerNodeFunActor<'CallbackMsg, 'ServerMsg>(actor: ServerNodeActor<'CallbackMsg, 'ServerMsg> -> Effect<'ServerMsg>) as this =
+        member x.EndpointsUpdated = serverEndpointsUpdatedEvent 
+
+        member x.Sender() = x.Sender()
+
+        member x.Callback(callbackMsg) =
+            let ctx = (x :> ExtActor<_>)
+            for endpoint in endpoints do
+                (endpoint.Value :> ICanTell<_>).Tell(callbackMsg, untyped ctx.Self)
+
+        member x.Self = 
+            failwith "Invalid opertor"
+            ()
+
+type private ServerNodeFunActor<'CallbackMsg, 'ServerMsg>(actor: ServerNodeActor<'CallbackMsg, 'ServerMsg> -> Effect<'ServerMsg>) as this =
     inherit Actor()
     let untypedContext = UntypedActor.Context :> IActorContext
     let ctx = ServerNodeTypedContext<'CallbackMsg ,'ServerMsg, ServerNodeFunActor<'CallbackMsg, 'ServerMsg>>(untypedContext, this)
@@ -39,25 +119,29 @@ type ServerNodeFunActor<'CallbackMsg, 'ServerMsg>(actor: ServerNodeActor<'Callba
     let log = untypedContext.System.Log
     let system = untypedContext.System
 
+    member x.EnqueueAskingToken(token) = ctx.EnqueueAskingToken(token)
+
+    member internal x.ProcessServerNodeMsg(serverNodeMsg) =
+        match serverNodeMsg with
+        | ServerNodeMsg.AddClient (clientIdentity) ->
+            match Map.tryFind clientIdentity.Address (ctx.GetEndpoints()) with
+            | Some _ -> ()
+            | None -> ctx.SetEndpoints(ctx.GetEndpoints().Add(clientIdentity.Address, RemoteActor<_>.Create(system, clientIdentity)))
+        | ServerNodeMsg.RemoveClient (address) ->
+            match Map.tryFind address (ctx.GetEndpoints()) with 
+            | Some clientIdentity -> 
+                ctx.SetEndpoints(ctx.GetEndpoints().Remove(address))
+            | None -> ()
+
+    member x.GetEndpoints() = ctx.GetEndpoints()
+
     abstract member Next: current: Effect<'ServerMsg> * context: ServerNodeActor<'CallbackMsg, 'ServerMsg> * message: obj -> Effect<'ServerMsg>
 
-    default __.Next (current : Effect<'ServerMsg>, _ : ServerNodeActor<'CallbackMsg, 'ServerMsg>, message : obj) : Effect<'ServerMsg> = 
+    default x.Next (current : Effect<'ServerMsg>, _ : ServerNodeActor<'CallbackMsg, 'ServerMsg>, message : obj) : Effect<'ServerMsg> = 
         match message with
         | :? ServerNodeMsg as serverNodeMsg ->
-            match serverNodeMsg with
-            | ServerNodeMsg.AddClient (clientIdentity) ->
-                match Map.tryFind clientIdentity.Address ctx.Endpoints with
-                | Some _ -> current
-                | None ->
-                    ctx.SetEndpoints(ctx.Endpoints.Add(clientIdentity.Address, RemoteActor<_>.Create(system, clientIdentity)))
-                    current
-            | ServerNodeMsg.RemoveClient (address) ->
-                match Map.tryFind address ctx.Endpoints with 
-                | Some clientIdentity -> 
-                    ctx.SetEndpoints(ctx.Endpoints.Remove(address))
-                    current
-                | None -> current
-
+            x.ProcessServerNodeMsg(serverNodeMsg)
+            current
         | :? LifecycleEvent -> 
             // we don't treat unhandled lifecycle events as casual unhandled messages
             current
@@ -88,13 +172,21 @@ type ServerNodeFunActor<'CallbackMsg, 'ServerMsg>(actor: ServerNodeActor<'Callba
                         | :? Become<'ServerMsg> -> behavior <- eff
                         | effect -> effect.OnApplied(ctx, msg :?> 'ServerMsg)
                         () } |> Async.StartAsTask
-                upcast task ))
+                upcast task )
+            )
 
         | effect -> effect.OnApplied(ctx, msg :?> 'ServerMsg)
 
 
     member this.Handle (msg: obj) = 
-        let nextBehavior = this.Next (behavior, ctx, msg)
+        let nextBehavior = 
+            try 
+                this.Next (behavior, ctx, msg)
+            with ex ->
+                ctx.ProcessException(ex)
+
+                upcast Ignore
+
         this.HandleNextBehavior(msg, nextBehavior)
     
     member __.Sender() : IActorRef = base.Sender
@@ -129,11 +221,12 @@ type ServerNodeFunActor<'CallbackMsg, 'ServerMsg>(actor: ServerNodeActor<'Callba
 
 
 
-type private ServerMsgWrapper<'ServerMsg> = ServeerMsgWrapper of 'ServerMsg
 
 type private ServerEndpointFunActor<'CallbackMsg, 'ServerMsg>(actor: ServerNodeActor<'CallbackMsg, 'ServerMsg> -> Effect<'ServerMsg>, clientRoleName)  =
     inherit ServerNodeFunActor<'CallbackMsg, 'ServerMsg>(actor)
     override x.Next (current : Effect<'ServerMsg>, context : ServerNodeActor<'CallbackMsg, 'ServerMsg>, message : obj) : Effect<'ServerMsg> = 
+        
+        let actorContext = (context :> Actor<_>)
 
         let clusterSystem = context.System
 
@@ -145,7 +238,7 @@ type private ServerEndpointFunActor<'CallbackMsg, 'ServerMsg>(actor: ServerNodeA
         | :? EndpointMsg as endpointMsg ->
             match endpointMsg with 
             | EndpointMsg.AddClient clientIdentity ->
-                match Map.tryFind clientIdentity.Address context.Endpoints with
+                match Map.tryFind clientIdentity.Address (x.GetEndpoints()) with
                 | Some _ -> current
                 | None ->
                     let addClientMsg = ServerNodeMsg.AddClient clientIdentity
@@ -154,7 +247,7 @@ type private ServerEndpointFunActor<'CallbackMsg, 'ServerMsg>(actor: ServerNodeA
                     current
 
             | EndpointMsg.RemoveClient address ->
-                match Map.tryFind address context.Endpoints with 
+                match Map.tryFind address (x.GetEndpoints()) with 
                 | Some _ -> 
                     clusterSystem.EventStream.Publish(ServerNodeMsg.RemoveClient(address))
                     log.Info (sprintf "[SERVER] Remove Client %O" address)
@@ -169,13 +262,13 @@ type private ServerEndpointFunActor<'CallbackMsg, 'ServerMsg>(actor: ServerNodeA
         | LifecycleEvent e ->
             match e with
             | PreStart ->
-                cluster.Subscribe(untyped context.Self, ClusterEvent.InitialStateAsEvents,
+                cluster.Subscribe(untyped actorContext.Self, ClusterEvent.InitialStateAsEvents,
                     [| typedefof<ClusterEvent.IMemberEvent> |])
-                log.Info (sprintf "Actor subscribed to Cluster status updates: %O" context.Self)
+                log.Info (sprintf "Actor subscribed to Cluster status updates: %O" actorContext.Self)
                 current
             | PostStop ->
-                cluster.Unsubscribe(untyped context.Self)
-                log.Info (sprintf "Actor unsubscribed from Cluster status updates: %O" context.Self)
+                cluster.Unsubscribe(untyped actorContext.Self)
+                log.Info (sprintf "Actor unsubscribed from Cluster status updates: %O" actorContext.Self)
                 current
             | _ -> current
 
@@ -204,20 +297,26 @@ type private ServerEndpointFunActor<'CallbackMsg, 'ServerMsg>(actor: ServerNodeA
 
             current
 
-        | :? 'ServerMsg as serverMsg ->
-            log.Info (sprintf "[SERVER] recieve msg %O" serverMsg)
+        | :? ServerMsgAskingToken<'ServerMsg> as token ->
+            log.Info (sprintf "[SERVER] recieve msg %O" token)
+            x.EnqueueAskingToken(token.Guid)
             let sender = context.Sender()
-
-            match Map.tryFind sender.Path.Address context.Endpoints, sender.Path.Name = clientRoleName with 
+            match Map.tryFind sender.Path.Address (x.GetEndpoints()), sender.Path.Name = clientRoleName with 
             | Some _, true -> 
-                base.Self.Forward(ServeerMsgWrapper serverMsg)
-                current
+                match current with
+                | :? Become<'ServerMsg> as become -> 
+                    become.Next token.ServerMsg
 
+                | _ -> current
 
             | None, true ->
-                clusterSystem.EventStream.Publish(ServerNodeMsg.AddClient { Address = sender.Path.Address; Role = clientRoleName }) 
-                base.Self.Forward(ServeerMsgWrapper serverMsg)
-                current
+                base.ProcessServerNodeMsg(ServerNodeMsg.AddClient { Address = sender.Path.Address; Role = clientRoleName })
+                match current with
+                | :? Become<'ServerMsg> as become -> 
+                    become.Next token.ServerMsg
+
+                | _ -> current
+
 
             | _, false -> 
                 log.Error (sprintf "[SERVER] Unknown remote client %O" sender.Path.Address )
@@ -226,31 +325,30 @@ type private ServerEndpointFunActor<'CallbackMsg, 'ServerMsg>(actor: ServerNodeA
         | :? ServerNodeMsg ->
             base.Next (current, context, message)
 
-        | :? ServerMsgWrapper<'ServerMsg> as keep ->
-            match current with
-            | :? Become<'ServerMsg> as become -> 
-                let (ServeerMsgWrapper serverMsg) = keep
-                become.Next serverMsg
-            | _ -> current
+        | :? 'ServerMsg ->
+            base.Next (current, context, message)
+
         | _ ->
             log.Error (sprintf "[SERVER] Unknown message %O" message )
             base.Next (current, context, message)
 
     override x.HandleNextBehavior(msg: obj, nextBehavior) =
         match msg with 
-        | :? ServerMsgWrapper<'ServerMsg> as keep ->
-            let (ServeerMsgWrapper msg) = keep 
-            base.HandleNextBehavior(msg, nextBehavior)
+        | :? ServerMsgAskingToken<'ServerMsg> as token ->
+            base.HandleNextBehavior(token.ServerMsg, nextBehavior)
         | _ -> base.HandleNextBehavior(msg, nextBehavior)
         
 
 [<RequireQualifiedAccess>]
 module Server =
-    let inline nodeProps (receive: ServerNodeActor<'CallbackMsg, 'ServerMsg>->Effect<'ServerMsg>) : Props<'ServerMsg> = 
-        Props<'ServerMsg>.Create<ServerNodeFunActor<'CallbackMsg, 'ServerMsg>, ServerNodeActor<'CallbackMsg, 'ServerMsg>, 'ServerMsg>(receive)
 
-    let inline internal endpointProps clientRoleName (receive: ServerNodeActor<'CallbackMsg, 'ServerMsg>->Effect<'ServerMsg>) : Props<'ServerMsg> = 
+    //let nodeProps (receive: ServerNodeActor<'CallbackMsg, 'ServerMsg>->Effect<'ServerMsg>) : Props<'ServerMsg> = 
+    //    Props<'ServerMsg>.Create<ServerNodeFunActor<'CallbackMsg, 'ServerMsg>, ServerNodeActor<'CallbackMsg, 'ServerMsg>, 'ServerMsg>(receive)
+
+    let internal endpointProps clientRoleName (receive: ServerNodeActor<'CallbackMsg, 'ServerMsg>->Effect<'ServerMsg>) : Props<'ServerMsg> = 
         Props<'ServerMsg>.ArgsCreate<ServerEndpointFunActor<'CallbackMsg, 'ServerMsg>, ServerNodeActor<'CallbackMsg, 'ServerMsg>, 'ServerMsg>([| receive; clientRoleName |])
+
+
 
 
 type Server<'CallbackMsg, 'ServerMsg>
@@ -261,14 +359,15 @@ type Server<'CallbackMsg, 'ServerMsg>
       setParams, 
       receive: ServerNodeActor<'CallbackMsg, 'ServerMsg> -> Effect<'ServerMsg> ) =
 
-    let config = Config.createClusterConfig [name] systemName remotePort seedPort setParams
+    let config = Configuration.createClusterConfig [name] systemName remotePort seedPort setParams
     
     let clusterSystem = System.create systemName config
 
     let log = clusterSystem.Log
 
-    let actor =
-        spawn clusterSystem name (Server.endpointProps clientRoleName (receive))
+    let actor = spawn clusterSystem name (Server.endpointProps clientRoleName (receive))
+
+    member x.SystemName = systemName
 
     member x.Config = config
 

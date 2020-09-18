@@ -1,4 +1,5 @@
 ﻿namespace Shrimp.Akkling.Cluster.Intergraction
+#nowarn "0104"
 open Akkling
 open System
 open Akka.Actor
@@ -9,6 +10,18 @@ open System.Timers
 open Akka.Event
 open Extensions
 open Akka.Configuration
+open Shrimp.Akkling.Cluster.Intergraction.Configuration
+open Shrimp.Akkling.Cluster.Intergraction
+
+
+
+
+type ClientEndpointsUpdatedEvent = ClientEndpointsUpdatedEvent of Map<Address, RemoteActorReachable * RemoteActor<obj>>
+
+[<RequireQualifiedAccess>]
+type RemoteJob<'ServerMsg> = 
+    | Tell of 'ServerMsg
+    | Ask of 'ServerMsg * timespan: TimeSpan option
 
 [<RequireQualifiedAccess>]
 module internal Client =
@@ -27,7 +40,6 @@ module internal Client =
         | _ -> None
 
 
-    type private EndpointsUpdatedEvent = EndpointsUpdatedEvent of Map<Address, RemoteActorReachable * RemoteActor<obj>>
 
     [<RequireQualifiedAccess>]
     module private RemoteActorManager =
@@ -89,7 +101,7 @@ module internal Client =
                                 | RemoteActorReachable.No ->
                                     log.Info (sprintf "[CLIENT] [RemoteActorManager] Mark remote server as reachable %O" server.Address)
                                     let newEndpoints = model.Endpoints.Add (server.Address, (RemoteActorReachable.Yes, RemoteActor<_>.Create(clusterSystem, server)))
-                                    clusterSystem.EventStream.Publish(EndpointsUpdatedEvent newEndpoints)
+                                    clusterSystem.EventStream.Publish(ClientEndpointsUpdatedEvent newEndpoints)
                                     return! loop { model with Endpoints = newEndpoints }
 
                                 | RemoteActorReachable.Yes -> ()
@@ -98,7 +110,7 @@ module internal Client =
                                 log.Info (sprintf "[CLIENT] [RemoteActorManager] Added remote server %O" server.Address)
                             
                                 let newEndpoints = model.Endpoints.Add (server.Address, (RemoteActorReachable.Yes, RemoteActor<_>.Create(clusterSystem, server)))
-                                clusterSystem.EventStream.Publish(EndpointsUpdatedEvent newEndpoints)
+                                clusterSystem.EventStream.Publish(ClientEndpointsUpdatedEvent newEndpoints)
 
                                 return! loop { model with Endpoints = newEndpoints }
 
@@ -121,7 +133,7 @@ module internal Client =
                                                 else (reachAble, actor)
                                             )
 
-                                        clusterSystem.EventStream.Publish(EndpointsUpdatedEvent newEndpoints)
+                                        clusterSystem.EventStream.Publish(ClientEndpointsUpdatedEvent newEndpoints)
 
                                         { model with Endpoints = newEndpoints }
 
@@ -134,7 +146,7 @@ module internal Client =
                                             actor
 
                                         clusterSystem.EventStream.Publish(ServerRemovedEvent (remoteActor.GetIdentity()))
-                                        clusterSystem.EventStream.Publish(EndpointsUpdatedEvent newEndpoints)
+                                        clusterSystem.EventStream.Publish(ClientEndpointsUpdatedEvent newEndpoints)
 
                                         { model with Endpoints = newEndpoints }
 
@@ -159,17 +171,19 @@ module internal Client =
             | MemberRemoved of Address
             | Success of obj
 
-        type AskingInfo =
+        type AskingInfo<'ServerMsg> =
             { RemoteActorAddress: Address
               Sender: IActorRef<Response>
               Guid: Guid
-              Timer: Timer option }
+              Timer: Timer option
+              ServerMsg: 'ServerMsg }
 
         type Msg<'ServerMsg> = Msg of remoteServer: RemoteActor<'ServerMsg> * remoteActorAdddress: Address * 'ServerMsg * TimeSpan option
 
-        type private Timeout = Timeout of AskingInfo
+        type private Timeout<'ServerMsg> = Timeout of AskingInfo<'ServerMsg>
 
         let createAgent 
+            (errorNotifycationEvent: Event<ErrorNotifycation>)
             seedNodes
             callbackActor 
             name 
@@ -180,10 +194,13 @@ module internal Client =
                 let remoteActorManager : IActorRef<EndpointMsg> = 
                     RemoteActorManager.createAgent seedNodes clusterSystem serverRoleName
 
+                let emptyAskingInfos:  list<AskingInfo<'ServerMsg>> = list.Empty
+
                 spawn clusterSystem name (props (fun ctx ->
 
                     let log = ctx.Log.Value
-                    let rec loop (askingInfos: list<AskingInfo>) = actor {
+                    let rec loop (askingInfos: list<AskingInfo<'ServerMsg>>) = actor {
+
                         let! msg = ctx.Receive() : IO<obj>
                         let sender = ctx.Sender()
                         match msg with
@@ -217,7 +234,7 @@ module internal Client =
 
                                 expiredInfo.Sender <! Response.MemberRemoved expiredInfo.RemoteActorAddress
                                     
-                                log.Info (sprintf "[CLIENT] Remove ask tasks after member %O removed" expiredInfo.RemoteActorAddress)
+                                log.Info (sprintf "[CLIENT] [CancelableAsk] Remove ask tasks after member %O removed" expiredInfo.RemoteActorAddress)
                                     
                             return! loop guaranteedInfos
 
@@ -228,26 +245,28 @@ module internal Client =
                                     remoteActorManager <! EndpointMsg.AddServer { Address = sender.Path.Address; Role = serverRoleName }
 
                                 callbackActor <! callback
-                            | None -> log.Error (sprintf "Cannot find a callback actor to process %O" callback)
+                            | None -> log.Error (sprintf "[CLIENT] [CancelableAsk] Cannot find a callback actor to process %O" callback)
 
 
                         | :? EndpointMsg as endpointMsg ->
                             remoteActorManager <<! endpointMsg
 
-                        | :? Timeout as timeout ->
-                            log.Info (sprintf "[CLIENT] Ask task timeout: %O" timeout)
+                        | :? Timeout<'ServerMsg> as timeout ->
+                            log.Info (sprintf "[CLIENT] [CancelableAsk] Ask task timeout: %O" timeout)
                             let (Timeout (askingInfo)) = timeout
 
                             match askingInfos |> List.tryFindIndex (fun askingInfo0 -> askingInfo0.Guid = askingInfo.Guid) with 
                             | Some index ->
+                                assert (askingInfo.RemoteActorAddress = askingInfos.[index].RemoteActorAddress)
+
                                 let askingInfo = askingInfos.[index]
 
                                 askingInfo.Sender <! Response.Timeout
 
-                                log.Info (sprintf "[CLIENT] Remove ask task %O %O after timeout" askingInfo.RemoteActorAddress askingInfo.Guid)
+                                log.Info (sprintf "[CLIENT] [CancelableAsk] Remove ask task %O %O after timeout" askingInfo.RemoteActorAddress askingInfo.Guid)
                                 return! loop (askingInfos.[0..index - 1] @ askingInfos.[index + 1..askingInfos.Length - 1])
                             | _ ->
-                                log.Error "[CLIENT] Timeout, but the ask task has been already removed"
+                                log.Error "[CLIENT] [CancelableAsk] Timeout, but the ask task has been already removed"
 
 
                         | :? Msg<'ServerMsg> as msg ->
@@ -263,7 +282,8 @@ module internal Client =
                                 { RemoteActorAddress = remoteActorAddress
                                   Sender = sender
                                   Guid = Guid.NewGuid()
-                                  Timer = timer }
+                                  Timer = timer
+                                  ServerMsg = msg }
 
                             match askingInfo.Timer with 
                             | Some timer ->
@@ -274,15 +294,26 @@ module internal Client =
                                 )
                             | None -> ()
 
-                            remoteServer <! msg
+                            let msg = 
+                                { Guid = askingInfo.Guid 
+                                  ServerMsg = msg }
 
-                            log.Info (sprintf "[CLIENT] Add ask task %O %O" askingInfo.RemoteActorAddress askingInfo.Guid)
+
+                            (remoteServer :> ICanTell<_>).Underlying.Tell(msg, untyped ctx.Self)
+                            //(remoteServer :> ICanTell<_>).Underlying.Tell(msg, untyped ctx.Self)
+
+                            log.Info (sprintf "[CLIENT] [CancelableAsk] Add ask task %O %O" askingInfo.RemoteActorAddress askingInfo.Guid)
 
                             return! loop (askingInfo :: askingInfos)
 
-                        | value -> 
-                            match askingInfos |> List.tryFindIndexBack (fun askingInfo -> askingInfo.RemoteActorAddress = sender.Path.Address), sender.Path.Name = serverRoleName with 
+                        | :? ErrorNotifycation as errorNotifycation ->
+                            errorNotifycationEvent.Trigger errorNotifycation
+
+                        | :? ServerResponse as response -> 
+
+                            match askingInfos |> List.tryFindIndexBack (fun askingInfo -> askingInfo.RemoteActorAddress = sender.Path.Address && askingInfo.Guid = response.Guid), sender.Path.Name = serverRoleName with 
                             | Some index, true ->
+                                let value = response.Response
                                 let askingInfo = askingInfos.[index]
                                 match askingInfo.Timer with 
                                 | Some timer -> 
@@ -290,52 +321,50 @@ module internal Client =
                                     timer.Dispose()
                                 | None -> ()
 
-                                log.Info (sprintf "[CLIENT] Receive msg %O from remote server %O" value sender.Path.Address)
+                                log.Info (sprintf "[CLIENT] [CancelableAsk] Receive response %O from remote server %O \n of %O" value sender.Path.Address askingInfo.ServerMsg)
                                 remoteActorManager <! EndpointMsg.AddServer { Address = askingInfo.RemoteActorAddress; Role = serverRoleName }
                                 askingInfo.Sender <! Response.Success value
 
                                 return! loop (askingInfos.[0..index - 1] @ askingInfos.[index + 1..askingInfos.Length - 1])
 
                             | _ ->
-                                log.Error (sprintf "[CLIENT] Unhandled message %O" msg)
+                                log.Error (sprintf "[CLIENT] [CancelableAsk] Unhandled message %O" msg)
                                 return Unhandled
-
+                        | _ -> 
+                            log.Error (sprintf "[CLIENT] [CancelableAsk] Unhandled message %O" msg)
+                            return Unhandled
                     }
-                    loop []
+
+                    loop emptyAskingInfos
                 ))
 
             retype actor
 
             
 
-    [<RequireQualifiedAccess>]
-    type RemoteJob<'ServerMsg> = 
-        | Tell of 'ServerMsg
-        | Ask of 'ServerMsg * timespan: TimeSpan option
 
     [<RequireQualifiedAccess>]
     module JobScheduler =
 
         type private Model =
             { JobCount: int
-              Endpoints: Map<Address, RemoteActorReachable * RemoteActor<obj>>}
+              Endpoints: Map<Address, RemoteActorReachable * RemoteActor<obj>> }
 
-        let createAgent seedNodes clusterSystem name serverRoleName (callbackActor: IActorRef<'CallbackMsg> option) : IActorRef<RemoteJob<'ServerMsg>> = 
-
+        let createAgent (endpointsUpdatedEvent: Event<_>) errorNotifycationEvent seedNodes clusterSystem name serverRoleName (callbackActor: IActorRef<'CallbackMsg> option) : IActorRef<RemoteJob<'ServerMsg>> = 
             let (cancelableAskAgent: IActorRef<CancelableAsk.Msg<'ServerMsg>>) = 
-                CancelableAsk.createAgent seedNodes callbackActor name serverRoleName clusterSystem
+                CancelableAsk.createAgent errorNotifycationEvent seedNodes callbackActor name serverRoleName clusterSystem
 
             let actor : IActorRef<RemoteJob<'ServerMsg>> = 
                 spawnAnonymous clusterSystem (props (fun ctx ->
+
                     let log = ctx.Log.Value
-                    let cluster = Cluster.Get(clusterSystem)
                     let rec loop (model: Model)  = actor {
                         let! receivedMsg = ctx.Receive() : IO<obj>
                         match receivedMsg with 
                         | LifecycleEvent e ->
                             match e with
                             | PreStart ->
-                                let b = clusterSystem.EventStream.Subscribe(untyped ctx.Self, typeof<EndpointsUpdatedEvent>)
+                                let b = clusterSystem.EventStream.Subscribe(untyped ctx.Self, typeof<ClientEndpointsUpdatedEvent>)
 
                                 log.Info (sprintf "Actor subscribed to Cluster status updates: %O" ctx.Self)
                             
@@ -346,13 +375,13 @@ module internal Client =
 
                             | _ -> return Unhandled
 
-                        | :? EndpointsUpdatedEvent as endpointsUpdatedEvent ->
-                            let (EndpointsUpdatedEvent endpoints) = endpointsUpdatedEvent
+                        | :? ClientEndpointsUpdatedEvent as clientEndpointsUpdatedEvent ->
+                            let (ClientEndpointsUpdatedEvent endpoints) = clientEndpointsUpdatedEvent
+                            endpointsUpdatedEvent.Trigger(clientEndpointsUpdatedEvent)
                             return! loop { model with Endpoints = endpoints }
 
                         | :? RemoteJob<'ServerMsg> as job ->
                             let endpoints = model.Endpoints
-
                             if endpoints.Count = 0 then 
                                 match job with 
                                 | RemoteJob.Tell _  ->
@@ -360,7 +389,10 @@ module internal Client =
 
                                 | RemoteJob.Ask _ ->
                                     log.Warning(sprintf "Service unavailable, try again later. %O" receivedMsg)
-                                    let error = Result.Error (sprintf "Service unavailable, try again later. %O" receivedMsg)
+                                    let error =  
+                                        (sprintf "[Client] [JobScheduler] Service unavailable, try again later. %O" receivedMsg)
+                                        |> ErrorResponse.ClientText
+                                        |> Result.Error
                                     ctx.Sender() <! error
 
                                 return Unhandled
@@ -394,7 +426,7 @@ module internal Client =
 
                                 match job with 
                                 | RemoteJob.Tell msg -> 
-                                    remoteServer <! msg
+                                    (remoteServer :> ICanTell<_>).Underlying.Tell(msg, untyped cancelableAskAgent)
                                     return! loop { model with JobCount = model.JobCount + 1}
 
                                 | RemoteJob.Ask (msg, timeSpan) ->
@@ -417,14 +449,17 @@ module internal Client =
 
                                     match result with 
                                     | CancelableAsk.Response.Unreachable addr ->
-                                        let result: Result<obj, string> = 
-                                            Result.Error (sprintf "Please make sure remote seed node is reachable, And manully send a 5s timed task to reconnect to remote seed node")
+                                        let result: Result<obj, ErrorResponse> = 
+                                            (sprintf "[Client] [JobScheduler] Please make sure remote seed node is reachable, And manully send a 5s timed task to reconnect to remote seed node")
+                                            |> ErrorResponse.ClientText
+                                            |> Result.Error
                                         let sender = ctx.Sender()
                                         sender <! result
                                         return! loop { model with JobCount = model.JobCount + 1}
 
                                     | CancelableAsk.Response.Success result ->
-                                        let result: Result<obj, string> = Result.Ok result
+                                        let result: Result<obj, ErrorResponse> = Result.Ok result
+
                                         ctx.Sender() <! result
                                         return! loop { model with JobCount = model.JobCount + 1}
 
@@ -434,12 +469,21 @@ module internal Client =
                                         return! loop { model with JobCount = model.JobCount + 1}
 
                                     | CancelableAsk.Response.Timeout ->
-                                        let result: Result<obj, string> = Result.Error (sprintf "Time exceed %A" timeSpan)
+                                        let result: Result<obj, ErrorResponse> = 
+                                            match reachable with 
+                                            | RemoteActorReachable.No ->
+                                                (sprintf "[Client] [JobScheduler] Remote server unreachable, the ask request doesn't get response in 5s, try again later")
+                                                |> ErrorResponse.ClientText
+                                                |> Result.Error
+                                            | RemoteActorReachable.Yes ->
+                                                (sprintf "[Client] [JobScheduler] Time out %A" timeSpan)
+                                                |> ErrorResponse.ClientText
+                                                |> Result.Error
                                         ctx.Sender() <! result
                                         return! loop { model with JobCount = model.JobCount + 1}
 
                         | _ -> 
-                            log.Error (sprintf "[CLIENT] unexcepted msg %O" receivedMsg)
+                            log.Error (sprintf "[Client] [JobScheduler] unexcepted msg %O" receivedMsg)
                             return Unhandled
                     }
                     loop { JobCount = 0; Endpoints = Map.empty }
@@ -448,26 +492,91 @@ module internal Client =
 
             actor
 
+type private RacingManualResetSetReason =
+    | Set = 0
+    | TimeElapsed = 1
 
-type Client<'CallbackMsg,'ServerMsg>(systemName, name, serverRoleName, remotePort, seedPort, callback: Actor<'CallbackMsg> -> Effect<'CallbackMsg>, setParams) =
-    let clusterConfig: Config = Config.createClusterConfig [name] systemName remotePort seedPort setParams
+type private RacingManualReset(interval: float) =
+    
+
+    let masterManualReset = new ManualResetEventSlim(false)
+
+    let sencondardManualReset = new ManualResetEventSlim(false)
+
+    let mutable whySet = RacingManualResetSetReason.Set
+
+    let timer = new Timer(interval)
+
+    do 
+        timer.Elapsed.Add(fun _ ->
+            if not masterManualReset.IsSet 
+            then 
+                whySet <- RacingManualResetSetReason.TimeElapsed
+                masterManualReset.Set()
+        )
+        timer.Start()
+
+    member x.DoUntilSetted(f) = async {
+        masterManualReset.Wait()
+        return f whySet
+    }
+
+    member x.ManualReset = sencondardManualReset
+
+    member x.Set() = 
+        whySet <- RacingManualResetSetReason.Set
+        masterManualReset.Set()
+        sencondardManualReset.Set()
+
+    member x.SetReason = whySet
+
+    member x.IsSet = masterManualReset.IsSet
+
+
+type Client<'CallbackMsg,'ServerMsg> (systemName, name, serverRoleName, remotePort, seedPort, callbackReceive: Actor<'CallbackMsg> -> Effect<'CallbackMsg>, setParams) =
+    let clusterConfig: Config = Configuration.createClusterConfig [name] systemName remotePort seedPort setParams
 
     let clusterSystem = System.create systemName clusterConfig
 
+
     let log = clusterSystem.Log
 
-    let callbackActor = spawnAnonymous clusterSystem (props callback)
-
-    let jobSchedulerAgent = 
-        let seedNodes = (clusterConfig.GetStringList("akka.cluster.seed-nodes"))
-
-        Client.JobScheduler.createAgent seedNodes clusterSystem name serverRoleName (Some callbackActor)
-
+    let errorNotifycationEvent = new Event<ErrorNotifycation>()
 
     let retryCount = (clusterConfig.GetInt("akka.cluster.client-ask-retry-count"))
 
     let retryTimeInterval = clusterConfig.GetTimeSpan("akka.cluster.client-ask-retry-time-interval")
+    let ``akka.cluster.client-maxium-connection-time`` = clusterConfig.GetTimeSpan("akka.cluster.client-maxium-connection-time")
 
+    let serverJoinedRacingManualReset = new RacingManualReset(``akka.cluster.client-maxium-connection-time``.TotalMilliseconds)
+
+    let endpointsUpdatedEvent = new Event<ClientEndpointsUpdatedEvent>()
+
+    do endpointsUpdatedEvent.Publish.Add(fun m ->
+        let (ClientEndpointsUpdatedEvent m) = m
+        if m.Count > 0
+        then 
+            match serverJoinedRacingManualReset.IsSet, serverJoinedRacingManualReset.SetReason with 
+            | false, _ -> serverJoinedRacingManualReset.Set()
+            | true, RacingManualResetSetReason.TimeElapsed -> serverJoinedRacingManualReset.Set()
+            | _ -> ()
+    )
+
+    let callbackActor = spawnAnonymous clusterSystem (props callbackReceive)
+
+    let jobSchedulerAgent = 
+        let seedNodes = (clusterConfig.GetStringList("akka.cluster.seed-nodes"))
+
+        Client.JobScheduler.createAgent endpointsUpdatedEvent errorNotifycationEvent seedNodes clusterSystem name serverRoleName (Some callbackActor)
+
+
+    member x.EndpointsUpdatedEvent = endpointsUpdatedEvent
+
+    member x.WarmUp(f) =
+        async {
+            serverJoinedRacingManualReset.ManualReset.Wait()
+            f()
+        } |> Async.Start
 
     member x.ClusterConfig = clusterConfig
 
@@ -475,34 +584,60 @@ type Client<'CallbackMsg,'ServerMsg>(systemName, name, serverRoleName, remotePor
 
     member x.Log = log
 
+    member x.ErrorNotifycationEvent = errorNotifycationEvent
+
     interface ICanTell<'ServerMsg> with
-        member this.Ask(arg1: 'ServerMsg, ?arg2: TimeSpan): Async<'Response> = async {
-            let rec retry count =
-                let result: Result<obj, string> = 
-                    jobSchedulerAgent <? (Client.RemoteJob.Ask (arg1, arg2))
-                    |> Async.RunSynchronously
-                match result with 
-                | Result.Error error -> 
-                    if count >= retryCount then 
-                        failwithf "%s" error 
-                    else 
-                        Thread.Sleep(retryTimeInterval)
-                        retry (count + 1)
+        member this.Ask(msg: 'ServerMsg, ?timespanOp: TimeSpan): Async<'Response> = 
+            serverJoinedRacingManualReset.DoUntilSetted(fun reason ->
+                match reason with 
+                | RacingManualResetSetReason.Set ->
+                    let rec retry countAccum =
 
-                | Result.Ok ok -> 
-                    match ok with 
-                    | :? ErrorResponse as error ->
-                        let (ErrorResponse error) = error 
-                        log.Error error
-                        failwith error
-                    | _ -> unbox ok
+                        let result: Result<obj, ErrorResponse> = 
+                            jobSchedulerAgent <? RemoteJob.Ask (msg, timespanOp)
+                            |> Async.RunSynchronously
 
-            return retry 1
-        }
+                        match result with 
+                        | Result.Error error -> 
+                            if countAccum >= retryCount then 
+                                raise (ErrorResponseException(error))
+                            else 
+                                Thread.Sleep(retryTimeInterval)
+                                retry (countAccum + 1)
+
+                        | Result.Ok ok -> 
+                            match ok with 
+                            | :? ErrorResponse as error ->
+                                match error with 
+                                | ErrorResponse.ClientText errorMsg
+                                | ErrorResponse.ServerText (errorMsg) ->
+                                    log.Error ("[CLIENT]" + errorMsg)
+                                | ErrorResponse.ServerException (ex) ->
+                                    log.Error ("[CLIENT]" + ex.ToString())
+
+                                raise (ErrorResponseException(error))
+
+                            | _ -> unbox ok
+
+                    retry 0
+
+
+                | RacingManualResetSetReason.TimeElapsed -> 
+                    let error = ErrorResponse.ClientText (sprintf  "[Client] RacingManualResetSetReason.TimeElapsed Service unavailable, try again later. %O" msg)
+                    raise (ErrorResponseException error)
+            )
+
+
 
         member this.Tell(arg1: 'ServerMsg, arg2: IActorRef): unit = 
-            jobSchedulerAgent <! (Client.RemoteJob.Tell arg1)
+            serverJoinedRacingManualReset.DoUntilSetted(fun reason ->
+                match reason with 
+                | RacingManualResetSetReason.Set -> jobSchedulerAgent <! (RemoteJob.Tell arg1)
+                | RacingManualResetSetReason.TimeElapsed -> log.Warning  (sprintf "Service unavailable, try again later. %O" arg1)
+            ) |> Async.Start
+            
 
         member this.Underlying: ICanTell = 
             jobSchedulerAgent.Underlying 
 
+        
