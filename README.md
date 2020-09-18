@@ -2,14 +2,13 @@
 Build upon on Akkling for client and server communication
 
 Has below features:
-1: Message and Callback message
-2: Warmup Message(Client send first message to server when connection is linked)
-3: Cluster load balance(This feature is not completed, now it's only a communication between client and server) 
+1. Message and Callback message
+2. Warmup Message(Client send first message to server when connection is linked)
+3. Cluster load balance(This feature is not completed, now it's only a communication between client and server) 
 
 # Samples
-Configurate your server seed point in `Shared.reference.conf`
-If necessary, Reconfigurate it in Client And Server 
-
+Configurate your server seed point in `Shared.reference.conf`  
+If necessary, reconfigurate it in `Client Side` And `Server Side`
 ## Shared library
 ```fsharp
 module Shared
