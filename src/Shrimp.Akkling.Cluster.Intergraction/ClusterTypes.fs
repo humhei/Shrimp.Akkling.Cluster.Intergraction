@@ -34,7 +34,7 @@ with
         | ErrorResponse.ClientText (errorMsg) -> errorMsg
 
 type ErrorResponseException(errorResponse: ErrorResponse) =
-    inherit System.Exception()
+    inherit System.Exception(errorResponse.ToString())
 
     member x.ErrorResponse = errorResponse
 
@@ -85,7 +85,9 @@ type RemoteActor<'Msg> private (clusterSystem: ActorSystem, address: Address, ro
         | _ -> false
 
     override x.GetHashCode() = hash x.Address
-    interface ICanTell<'Msg> with 
+    interface ICanTell<'Msg> with
+
+        member this.AskWith(fmsg, ?timespanOp) = raise (new NotImplementedException())
         member x.Ask(msg, ?timeSpan) = (actor :> ICanTell<'Msg>).Ask(msg, timeSpan)
         
         member x.Tell (msg, actorRef) = (actor :> ICanTell<'Msg>).Tell(msg, actorRef)

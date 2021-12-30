@@ -254,20 +254,28 @@ connection-string = "%s"
     module Configuration = 
 
         let tryCreateByApplicationConfig() =
-            let folder = System.IO.Path.GetDirectoryName(Assembly.GetEntryAssembly().Location)
-            let folders = 
-                [ folder ] 
-                @ possibleFolders()
-                  |> List.map (fun m -> Path.Combine(folder, m))
+            let entryAssemblyLocation =
+                try Some (Assembly.GetEntryAssembly().Location)
+                with ex -> None
 
-            folders 
-            |> List.map (fun folder -> Path.Combine(folder, "application.conf"))
-            |> List.tryFind (fun file -> File.Exists(file))
-            |> function
-                | Some file ->
-                    let texts = File.ReadAllText(file, Text.Encoding.UTF8)
-                    Some (Configuration.parse(texts))
-                | None -> None
+            match entryAssemblyLocation with 
+            | Some entryAssemblyLocation ->
+                let folder = System.IO.Path.GetDirectoryName(entryAssemblyLocation)
+                let folders = 
+                    [ folder ] 
+                    @ possibleFolders()
+                      |> List.map (fun m -> Path.Combine(folder, m))
+
+                folders 
+                |> List.map (fun folder -> Path.Combine(folder, "application.conf"))
+                |> List.tryFind (fun file -> File.Exists(file))
+                |> function
+                    | Some file ->
+                        let texts = File.ReadAllText(file, Text.Encoding.UTF8)
+                        Some (Configuration.parse(texts))
+                    | None -> None
+
+            | None -> None
 
         let createLocalConfig (setParams: LocalConfigBuildingArgs -> LocalConfigBuildingArgs) =
             let args = setParams LocalConfigBuildingArgs.DefaultValue

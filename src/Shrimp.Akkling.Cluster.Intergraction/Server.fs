@@ -19,9 +19,13 @@ type ServerSender<'Response> internal (sender: IActorRef<'Response>, self, queue
 
     member x.Path = sender.Path
 
-    interface ICanTell<'Response> with 
+    interface ICanTell<'Response> with
+        member this.AskWith(fmsg, ?timespanOp) = raise (new NotImplementedException())
+
         member x.Ask(message, timeSpan) =
             failwith "Server sender cannot perform an asking "
+
+
 
         member x.Tell(message, _) =
             let message = 
@@ -114,10 +118,18 @@ type private ServerNodeTypedContext<'CallbackMsg, 'ServerMsg, 'Actor when 'Actor
 type private ServerNodeFunActor<'CallbackMsg, 'ServerMsg>(actor: ServerNodeActor<'CallbackMsg, 'ServerMsg> -> Effect<'ServerMsg>) as this =
     inherit Actor()
     let untypedContext = UntypedActor.Context :> IActorContext
-    let ctx = ServerNodeTypedContext<'CallbackMsg ,'ServerMsg, ServerNodeFunActor<'CallbackMsg, 'ServerMsg>>(untypedContext, this)
-    let mutable behavior = actor ctx
     let log = untypedContext.System.Log
+    let ctx = ServerNodeTypedContext<'CallbackMsg ,'ServerMsg, ServerNodeFunActor<'CallbackMsg, 'ServerMsg>>(untypedContext, this)
+    
+    let mutable behavior = 
+        try
+            actor ctx
+        with ex ->
+            log.Error(ex.Message)
+            raise ex
+
     let system = untypedContext.System
+
 
     member x.EnqueueAskingToken(token) = ctx.EnqueueAskingToken(token)
 
@@ -160,6 +172,7 @@ type private ServerNodeFunActor<'CallbackMsg, 'ServerMsg>(actor: ServerNodeActor
             current
 
     abstract member HandleNextBehavior: msg: obj * nextBehavior: Effect<'ServerMsg> -> unit
+
     default __.HandleNextBehavior(msg, nextBehavior) =
         match nextBehavior with
         | :? Become<'ServerMsg> -> behavior <- nextBehavior
@@ -274,6 +287,11 @@ type private ServerEndpointFunActor<'CallbackMsg, 'ServerMsg>(actor: ServerNodeA
 
         | IMemberEvent e ->
             match e with
+            | MemberDowned m -> log.Info (sprintf "[SERVER] Node Downed up: %O" m)
+            | MemberWeaklyUp m -> 
+                log.Info (sprintf "[SERVER] Node Weakly up: %O" m)
+                
+
             | MemberJoined m | MemberUp m  ->
                 match e with 
                 | MemberJoined _ -> log.Info (sprintf "[SERVER] Node joined: %O" m)

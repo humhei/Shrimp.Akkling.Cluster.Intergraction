@@ -70,7 +70,7 @@ let main argv =
 
     client.WarmUp(fun _ ->
 
-        let result3 = 
+        let result1 = 
             client <! ServerMsg.Plus (66, 7)
 
         let result2: int = 
@@ -79,6 +79,10 @@ let main argv =
 
         let result3: int = 
             client <? ServerMsg.Plus (1, 2)
+            |> Async.RunSynchronously
+
+        let result4: int = 
+            client <? ServerMsg.Exp
             |> Async.RunSynchronously
         ()
     )
@@ -106,11 +110,9 @@ let main argv =
             let! msg = ctx.Receive()
             match msg with 
             | ServerMsg.Plus (input1, input2) ->
-                failwith "ServerMsg Plus Error"
-            | ServerMsg.Plus2 (input1, input2) ->
                 ctx.Sender() <! (input1 + input2)
-            | ServerMsg.WarmUp ->
-                failwith "WarmUp Error"
+            | ServerMsg.Exp  ->
+                failwith "Exception From ServerMsg_Exp"
         }
         loop 0
     ) |> ignore

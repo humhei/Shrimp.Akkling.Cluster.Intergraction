@@ -4,6 +4,9 @@ open Akka.Configuration
 open Shrimp.Akkling.Cluster.Intergraction
 open Akkling
 open Shrimp.Akkling.Cluster.Intergraction.Configuration
+open Microsoft.FSharp.Quotations
+open System
+open LiteDB
 
 type private AssemblyFinder = AssemblyFinder
 
@@ -20,13 +23,53 @@ let private port = referenceConfig.GetInt("Shared.port")
 let private configurationSetParams (args: ClusterConfigBuildingArgs) =
     {args with ``akka.loggers`` = Loggers (Set.ofList [Logger.Default])}
 
+type MyClass(name: string) =
+    member x.Name = name
+
+type Product =
+    { Id: ObjectId 
+      Name: string
+      MyClass: MyClass
+    }
+
+type OrderBrand =
+    { Id: ObjectId  
+      Name: string
+      Products: Product [] }
+
+type Company =
+    { Id: ObjectId
+      Name: string
+      OrderBrands: OrderBrand list }
+with 
+    override x.ToString() =
+        x.Id.ToString() + "name: " + x.Name
+
+type IHello =
+    abstract member Name: string
+
+type Hello = Hello with 
+    interface IHello with 
+        member x.Name = "Hello"
+
+type GoGo = GoGo with 
+    interface IHello with 
+        member x.Name = "GoGo"
+
 [<RequireQualifiedAccess>]
 type ServerMsg =
     | Plus of input1: int * input2: int
-    | Plus2 of input1: int * input2: int
-    | WarmUp
-
-
+    | GetAllCompanies
+    | SendUnuxpandedCompany of Company list
+    | Exp 
+    | Expr of Expr<Func<int, int>>
+    | Expr2 of Expr
+    | Func of Func<int, int>
+    | BsonExpr of BsonExpression
+    | BsonValue of BsonValue
+    | BsonDoc of BsonDocument
+    | IHello of IHello
+     
 [<RequireQualifiedAccess>]
 module Client =
     let create() =

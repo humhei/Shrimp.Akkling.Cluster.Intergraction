@@ -68,6 +68,8 @@ module internal Client =
 
                     | IMemberEvent e ->
                         match e with
+                        | MemberDowned m -> log.Info (sprintf "[CLIENT] Node Downed up: %O" m)
+                        | MemberWeaklyUp m -> log.Info (sprintf "[CLIENT] Node Weakly up: %O" m)
                         | MemberJoined m | MemberUp m  ->
                             match e with 
                             | MemberJoined _ -> log.Info (sprintf "[CLIENT] Node joined: %O" m)
@@ -532,12 +534,28 @@ type private RacingManualReset(interval: float) =
 
     member x.IsSet = masterManualReset.IsSet
 
+[<RequireQualifiedAccess>]
+type private InboxMsg =
+    | Do of f: (unit -> obj) * AsyncReplyChannel<obj>
 
 type Client<'CallbackMsg,'ServerMsg> (systemName, name, serverRoleName, remotePort, seedPort, callbackReceive: Actor<'CallbackMsg> -> Effect<'CallbackMsg>, setParams) =
     let clusterConfig: Config = Configuration.createClusterConfig [name] systemName remotePort seedPort setParams
 
     let clusterSystem = System.create systemName clusterConfig
 
+
+    let inbox = MailboxProcessor.Start(fun inbox -> 
+        let rec loop () = async {
+            let! msg = inbox.Receive()
+            match msg with 
+            | InboxMsg.Do (f, replyChannel) -> 
+                let r = f()
+                replyChannel.Reply r
+                return! loop ()
+        }
+
+        loop ()
+    )
 
     let log = clusterSystem.Log
 
@@ -587,46 +605,57 @@ type Client<'CallbackMsg,'ServerMsg> (systemName, name, serverRoleName, remotePo
     member x.ErrorNotifycationEvent = errorNotifycationEvent
 
     interface ICanTell<'ServerMsg> with
-        member this.Ask(msg: 'ServerMsg, ?timespanOp: TimeSpan): Async<'Response> = 
-            serverJoinedRacingManualReset.DoUntilSetted(fun reason ->
-                match reason with 
-                | RacingManualResetSetReason.Set ->
-                    let rec retry countAccum =
 
-                        let result: Result<obj, ErrorResponse> = 
-                            jobSchedulerAgent <? RemoteJob.Ask (msg, timespanOp)
-                            |> Async.RunSynchronously
+        member this.AskWith(fmsg, ?timespanOp) = raise (new NotImplementedException())
 
-                        match result with 
-                        | Result.Error error -> 
-                            if countAccum >= retryCount then 
-                                raise (ErrorResponseException(error))
-                            else 
-                                Thread.Sleep(retryTimeInterval)
-                                retry (countAccum + 1)
+        member this.Ask(msg: 'ServerMsg, ?timespanOp: TimeSpan): Async<'Response> = async {
+            let f() =
+                serverJoinedRacingManualReset.DoUntilSetted(fun reason ->
+                    match reason with 
+                    | RacingManualResetSetReason.Set ->
+                        let rec retry countAccum =
 
-                        | Result.Ok ok -> 
-                            match ok with 
-                            | :? ErrorResponse as error ->
-                                match error with 
-                                | ErrorResponse.ClientText errorMsg
-                                | ErrorResponse.ServerText (errorMsg) ->
-                                    log.Error ("[CLIENT]" + errorMsg)
-                                | ErrorResponse.ServerException (ex) ->
-                                    log.Error ("[CLIENT]" + ex.ToString())
+                            let result: Result<obj, ErrorResponse> = 
+                                jobSchedulerAgent <? RemoteJob.Ask (msg, timespanOp)
+                                |> Async.RunSynchronously
 
-                                raise (ErrorResponseException(error))
+                            match result with 
+                            | Result.Error error -> 
+                                if countAccum >= retryCount then 
+                                    raise (ErrorResponseException(error))
+                                else 
+                                    Thread.Sleep(retryTimeInterval)
+                                    retry (countAccum + 1)
 
-                            | _ -> unbox ok
+                            | Result.Ok ok -> 
+                                match ok with 
+                                | :? ErrorResponse as error ->
+                                    match error with 
+                                    | ErrorResponse.ClientText errorMsg
+                                    | ErrorResponse.ServerText (errorMsg) ->
+                                        log.Error ("[CLIENT]" + errorMsg)
+                                    | ErrorResponse.ServerException (ex) ->
+                                        log.Error ("[CLIENT]" + ex.ToString())
 
-                    retry 0
+                                    raise (ErrorResponseException(error))
+
+                                | _ -> unbox ok
+
+                        retry 0
 
 
-                | RacingManualResetSetReason.TimeElapsed -> 
-                    let error = ErrorResponse.ClientText (sprintf  "[Client] RacingManualResetSetReason.TimeElapsed Service unavailable, try again later. %O" msg)
-                    raise (ErrorResponseException error)
-            )
+                    | RacingManualResetSetReason.TimeElapsed -> 
+                        let error = ErrorResponse.ClientText (sprintf  "[Client] RacingManualResetSetReason.TimeElapsed Service unavailable, try again later. %O" msg)
+                        raise (ErrorResponseException error)
+                )
+                |> Async.RunSynchronously
+            let! r =
+                inbox.PostAndAsyncReply(fun replyChannle -> 
+                    InboxMsg.Do(f, replyChannle)
+                )
 
+            return (unbox<_> r)
+        }
 
 
         member this.Tell(arg1: 'ServerMsg, arg2: IActorRef): unit = 

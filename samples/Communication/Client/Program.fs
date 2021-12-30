@@ -4,62 +4,124 @@ open System
 open Shared
 open Akkling
 open System.Threading
+open LiteDB
+open LiteDB.FSharp
+open LiteDB.FSharp.Query
+
+type Record =
+    { Id: int 
+      Name: string }
 
 [<EntryPoint>]
 let main argv =
+
+    let start = DateTime.Now.Millisecond
 
     let system = System.create "Hello" <| Configuration.defaultConfig()
 
     let client = Client.create()
 
     client.WarmUp(fun _ ->
+        let a = 1
 
-        //client <! ServerMsg.WarmUp
+        //let result1 = 
+        //    client <! ServerMsg.Plus (66, 7)
 
-        //let m = 
-        //    try
-        //        client <? ServerMsg.WarmUp
-        //        |> Async.RunSynchronously
-        //    with ex ->
-        //        printfn "%A" ex
+        //let result0: int = 
+        //    client <? ServerMsg.Plus (60, 7)
+        //    |> Async.RunSynchronously
 
-        //let result = 
-        //    client <! ServerMsg.Plus (5, 7)
+        let result2 = 
+            [ 1..100 ]
+            |> List.map (fun m-> async {
+                    let! (v: int) = client <? ServerMsg.Plus (m, 5)
+                    return {|Origin = m; New = v|}
+                }
+            )
+            |> Async.Parallel
+            |> Async.RunSynchronously
 
-        let result3 = 
+        result2 
+        |> Array.iter(fun result -> if result.New - result.Origin <> 5 then failwithf "")
+
+        let result0 = 
+            client <? ServerMsg.BsonValue (BsonValue 1)
+            |> Async.RunSynchronously
+
+        let result0 = 
+            client <? ServerMsg.BsonValue (BsonValue 1)
+            |> Async.RunSynchronously
+
+        let result_hello = 
+            client <? ServerMsg.IHello (Hello)
+            |> Async.RunSynchronously
+
+        let result_hello = 
+            client <? ServerMsg.IHello (GoGo)
+            |> Async.RunSynchronously
+
+        let result1 = 
             client <! ServerMsg.Plus (66, 7)
 
-        let result2: int = 
-            client <? ServerMsg.Plus (1, 5)
-            |> Async.RunSynchronously
+
 
         let result3: int = 
             client <? ServerMsg.Plus (1, 2)
             |> Async.RunSynchronously
 
-        //let m = [
-        //    for i = 1 to 1000 do
-        //        if i % 2 = 0 
-        //        then
-        //            client <! ServerMsg.Plus (i, 3)
-        //            client <! ServerMsg.Plus (i, 4)
-        //            client <! ServerMsg.Plus (i, 5)
-        //        else
-        //            let result3: int =
-        //                client <? ServerMsg.Plus (i, 2)
-        //                |> Async.RunSynchronously
-        //            yield result3
-        //]
-        //let c = m
+        let result0: Company list = 
+            client <? ServerMsg.GetAllCompanies
+            |> Async.RunSynchronously
+
+        let result0 = 
+            client <? ServerMsg.SendUnuxpandedCompany (result0)
+            |> Async.RunSynchronously
+
+
+
+        //let result4: int = 
+        //    client <? ServerMsg.Exp
+        //    |> Async.RunSynchronously
+
+        let result5: int = 
+            client <? ServerMsg.Expr(<@ Func<_, _>(fun a -> 
+                let b = a + 6
+                let c = b * 2
+                c + 1) @>)
+            |> Async.RunSynchronously
+
+        let result6: int list = 
+            [ 1.. 100 ]
+            |> List.map (fun _ ->
+                client <? ServerMsg.Expr(<@ Func<_, _>(fun a -> 
+                    let b = a + 7
+                    let c = b * 3
+                    c + 1) @>)
+                |> Async.RunSynchronously
+            )
+
+
+        let result7: int = 
+            client <? ServerMsg.Expr(<@ Func<_, _>(fun a -> 
+                let b = a + 8
+                let c = b * 4
+                c + 1) @>)
+            |> Async.RunSynchronously
+
+        let s = DateTime.Now.Millisecond - start
+
+        System.IO.File.WriteAllText("C:\Users\Jia\Desktop\新建文本文档.txt", s.ToString())
+
+        client.Log.Error(sprintf "ELPASED %A" (DateTime.Now.Millisecond - start))
+
+        //let result6: int = 
+        //    client <? ServerMsg.Func(Func<_, _>(fun a -> a + 1))
+        //    |> Async.RunSynchronously
+
         ()
-        
     )
 
 
-
-    //let result2 = 
-    //    client <? ServerMsg.Plus (1, 2)
-    //    |> Async.RunSynchronously
 
     Console.Read()
     printfn "Hello World from F#!"

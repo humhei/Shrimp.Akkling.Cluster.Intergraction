@@ -12,11 +12,16 @@
   </ItemGroup>
 
   <ItemGroup>
+    <PackageReference Include="LiteDB.FSharp" Version="5.99.105"/>
+    <PackageReference Include="Shrimp.LiteDB" Version="5.99.146"/>
+  </ItemGroup>
+
+  <ItemGroup>
     <ProjectReference Include="..\..\..\..\src\Shrimp.Akkling.Cluster.Intergraction\Shrimp.Akkling.Cluster.Intergraction.fsproj" />
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Update="FSharp.Core" Version="4.7.0" />
+    <PackageReference Update="FSharp.Core" Version="5.0.0" />
   </ItemGroup>
 
 </Project>
