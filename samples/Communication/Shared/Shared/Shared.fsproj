@@ -13,7 +13,7 @@
 
   <ItemGroup>
     <PackageReference Include="LiteDB.FSharp" Version="5.99.105"/>
-    <PackageReference Include="Shrimp.LiteDB" Version="5.99.146"/>
+    <PackageReference Include="Shrimp.LiteDB" Version="5.99.156"/>
   </ItemGroup>
 
   <ItemGroup>

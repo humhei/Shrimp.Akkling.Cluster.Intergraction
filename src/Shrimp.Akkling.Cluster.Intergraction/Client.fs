@@ -536,7 +536,7 @@ type private RacingManualReset(interval: float) =
 
 [<RequireQualifiedAccess>]
 type private InboxMsg =
-    | Do of f: (unit -> obj) * AsyncReplyChannel<obj>
+    | Do of f: (unit -> obj) * AsyncReplyChannel<Choice<obj,Exception>>
 
 type Client<'CallbackMsg,'ServerMsg> (systemName, name, serverRoleName, remotePort, seedPort, callbackReceive: Actor<'CallbackMsg> -> Effect<'CallbackMsg>, setParams) =
     let clusterConfig: Config = Configuration.createClusterConfig [name] systemName remotePort seedPort setParams
@@ -549,9 +549,14 @@ type Client<'CallbackMsg,'ServerMsg> (systemName, name, serverRoleName, remotePo
             let! msg = inbox.Receive()
             match msg with 
             | InboxMsg.Do (f, replyChannel) -> 
-                let r = f()
-                replyChannel.Reply r
-                return! loop ()
+                try
+                    let r = f()
+                    replyChannel.Reply (Choice1Of2 r)
+                    return! loop ()
+                with ex ->
+                    replyChannel.Reply (Choice2Of2 ex)
+                    return! loop ()
+                    
         }
 
         loop ()
@@ -654,7 +659,9 @@ type Client<'CallbackMsg,'ServerMsg> (systemName, name, serverRoleName, remotePo
                     InboxMsg.Do(f, replyChannle)
                 )
 
-            return (unbox<_> r)
+            match r with 
+            | Choice1Of2 r  -> return (unbox<_> r)
+            | Choice2Of2 ex -> return raise ex
         }
 
 
