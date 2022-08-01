@@ -181,23 +181,25 @@ type private ServerNodeFunActor<'CallbackMsg, 'ServerMsg>(actor: ServerNodeActor
     abstract member HandleNextBehavior: msg: obj * nextBehavior: Effect<'ServerMsg> -> unit
 
     default __.HandleNextBehavior(msg, nextBehavior) =
-        match nextBehavior with
-        | :? Become<'ServerMsg> -> behavior <- nextBehavior
-        | :? AsyncEffect<'ServerMsg> as a ->
-            Akka.Dispatch.ActorTaskScheduler.RunTask(System.Func<System.Threading.Tasks.Task>(fun () -> 
-                let task = 
-                    async {
-                        let! eff = a.Effect
-                        match eff with
-                        | :? Become<'ServerMsg> -> behavior <- eff
-                        | effect -> effect.OnApplied(ctx, msg :?> 'ServerMsg)
-                        () } |> Async.StartAsTask
-                upcast task )
-            )
+        match msg with 
+        | :? 'ServerMsg as msg ->
+            match nextBehavior with
+            | :? Become<'ServerMsg> -> behavior <- nextBehavior
+            | :? AsyncEffect<'ServerMsg> as a ->
+                Akka.Dispatch.ActorTaskScheduler.RunTask(System.Func<System.Threading.Tasks.Task>(fun () -> 
+                    let task = 
+                        async {
+                            let! eff = a.Effect
+                            match eff with
+                            | :? Become<'ServerMsg> -> behavior <- eff
+                            | effect -> effect.OnApplied(ctx, msg)
+                            () } |> Async.StartAsTask
+                    upcast task )
+                )
 
-        //| :? CombinedEffect<'ServerMsg> as effects ->
+            | effect -> effect.OnApplied(ctx, msg)
 
-        | effect -> effect.OnApplied(ctx, msg :?> 'ServerMsg)
+        | _ -> ()
 
     member this.Become(effect) = behavior <- effect
 
