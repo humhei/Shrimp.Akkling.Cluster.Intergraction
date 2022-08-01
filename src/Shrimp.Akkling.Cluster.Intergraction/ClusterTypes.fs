@@ -22,18 +22,22 @@ module SerializableOption =
 
 [<RequireQualifiedAccess; Struct>]
 type ErrorResponse = 
-    | ServerText of serverText: string
-    | ServerException of exp: System.Exception
+    | ServerText of serverText: string 
+    | ServerException of exp: System.Exception * stackStrace: string
     | ClientText of clientText: string
-
 with 
-    override x.ToString() =
+    override x.ToString() = 
         match x with 
-        | ErrorResponse.ServerText (errorMsg) -> errorMsg
-        | ErrorResponse.ServerException (ex) -> ex.ToString()
-        | ErrorResponse.ClientText (errorMsg) -> errorMsg
+        | ErrorResponse.ServerText (v) -> "ServerText " + v
+        | ErrorResponse.ServerException (v, stackTrace) -> 
+            "ServerException " + v.ToString() + "\n------ServerStackTrace------\n" + stackTrace  + "\n------EndServerStackTrace------\n"
+    
+        | ErrorResponse.ClientText v ->
+            "ClientText " + v
+            
 
-type ErrorResponseException(errorResponse: ErrorResponse) =
+
+type ErrorResponseException internal (errorResponse: ErrorResponse) =
     inherit System.Exception(errorResponse.ToString())
 
     member x.ErrorResponse = errorResponse
@@ -49,12 +53,13 @@ type private ServerResponse =
 [<RequireQualifiedAccess; Struct>]
 type ErrorNotifycation =
     | ServerText of text: string
-    | ServerException of exp: System.Exception
+    | ServerException of exp: System.Exception * stackTrace: string
 with 
     override x.ToString() =
         match x with 
-        | ErrorNotifycation.ServerText errorMsg -> errorMsg
-        | ErrorNotifycation.ServerException ex -> ex.ToString()
+        | ErrorNotifycation.ServerText errorMsg -> "ServerText " + errorMsg
+        | ErrorNotifycation.ServerException (ex, stackTrace) -> 
+            "ServerException " + ex.ToString() + "\n-------StackTrace-------\n" + stackTrace + "\n----EndStackTrace-----\n"
 
 [<Struct>]
 type RemoteActorIdentity =

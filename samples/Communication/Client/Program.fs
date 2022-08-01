@@ -7,6 +7,7 @@ open System.Threading
 open LiteDB
 open LiteDB.FSharp
 open LiteDB.FSharp.Query
+open Shrimp.Akkling.Cluster.Intergraction
 
 type Record =
     { Id: int 
@@ -27,9 +28,9 @@ let main argv =
         //let result1 = 
         //    client <! ServerMsg.Plus (66, 7)
 
-        //let result0: int = 
-        //    client <? ServerMsg.Plus (60, 7)
-        //    |> Async.RunSynchronously
+        let result0: int = 
+            client <? ServerMsg.Exp
+            |> Async.RunSynchronously
 
         let result2 = 
             [ 1..100 ]

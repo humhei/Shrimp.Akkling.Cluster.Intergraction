@@ -539,7 +539,8 @@ type private InboxMsg =
     | Do of f: (unit -> obj) * AsyncReplyChannel<Choice<obj,Exception>>
 
 type Client<'CallbackMsg,'ServerMsg> (systemName, name, serverRoleName, remotePort, seedPort, callbackReceive: Actor<'CallbackMsg> -> Effect<'CallbackMsg>, setParams) =
-    let clusterConfig: Config = Configuration.createClusterConfig [name] systemName remotePort seedPort setParams
+    let clusterConfig: Config = 
+        Configuration.createClusterConfig [name] systemName remotePort seedPort setParams
 
     let clusterSystem = System.create systemName clusterConfig
 
@@ -635,13 +636,7 @@ type Client<'CallbackMsg,'ServerMsg> (systemName, name, serverRoleName, remotePo
                             | Result.Ok ok -> 
                                 match ok with 
                                 | :? ErrorResponse as error ->
-                                    match error with 
-                                    | ErrorResponse.ClientText errorMsg
-                                    | ErrorResponse.ServerText (errorMsg) ->
-                                        log.Error ("[CLIENT]" + errorMsg)
-                                    | ErrorResponse.ServerException (ex) ->
-                                        log.Error ("[CLIENT]" + ex.ToString())
-
+                                    log.Error ("[CLIENT]" + error.ToString())
                                     raise (ErrorResponseException(error))
 
                                 | _ -> unbox ok

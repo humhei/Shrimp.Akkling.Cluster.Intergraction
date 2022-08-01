@@ -57,7 +57,8 @@ type private ServerNodeMsg =
     | AddClient of RemoteActorIdentity
     | RemoveClient of Address
 
-
+type private IServerNodeFunActor<'ServerMsg> =
+    abstract member Become: Effect<'ServerMsg> -> unit
 
 type private ServerNodeTypedContext<'CallbackMsg, 'ServerMsg, 'Actor when 'Actor :> ActorBase and 'Actor :> IWithUnboundedStash>(context : IActorContext, actor : 'Actor) = 
     inherit TypedContext<'ServerMsg, 'Actor>(context, actor)
@@ -85,9 +86,9 @@ type private ServerNodeTypedContext<'CallbackMsg, 'ServerMsg, 'Actor when 'Actor
             else failwith "Invalid token"
         else 
             if count = 1
-            then x.Sender() <! ErrorResponse.ServerException (ex) 
+            then x.Sender() <! ErrorResponse.ServerException (ex, ex.StackTrace) 
             elif count = 0 
-            then x.Sender() <! ErrorNotifycation.ServerException (ex) 
+            then x.Sender() <! ErrorNotifycation.ServerException (ex, ex.StackTrace) 
             else failwith "Invalid token"
 
 
@@ -99,6 +100,12 @@ type private ServerNodeTypedContext<'CallbackMsg, 'ServerMsg, 'Actor when 'Actor
         serverEndpointsUpdatedEvent.Trigger(ServerEndpointsUpdatedEvent endpoints)
 
     member x.GetEndpoints() = endpoints
+
+    interface ExtActor<'ServerMsg> with 
+        member x.Become(effect: _) =
+            match box actor with
+            | :? IServerNodeFunActor<'ServerMsg> as act -> act.Become effect
+            | _ -> raise (Exception("Couldn't use actor in typed context"))
 
     interface ServerNodeActor<'CallbackMsg, 'ServerMsg> with 
 
@@ -188,8 +195,14 @@ type private ServerNodeFunActor<'CallbackMsg, 'ServerMsg>(actor: ServerNodeActor
                 upcast task )
             )
 
+        //| :? CombinedEffect<'ServerMsg> as effects ->
+
         | effect -> effect.OnApplied(ctx, msg :?> 'ServerMsg)
 
+    member this.Become(effect) = behavior <- effect
+
+    interface IServerNodeFunActor<'ServerMsg> with 
+        member x.Become(effect) = x.Become(effect)
 
     member this.Handle (msg: obj) = 
         let nextBehavior = 
@@ -325,6 +338,7 @@ type private ServerEndpointFunActor<'CallbackMsg, 'ServerMsg>(actor: ServerNodeA
                 | :? Become<'ServerMsg> as become -> 
                     become.Next token.ServerMsg
 
+
                 | _ -> current
 
             | None, true ->
@@ -377,8 +391,9 @@ type Server<'CallbackMsg, 'ServerMsg>
       setParams, 
       receive: ServerNodeActor<'CallbackMsg, 'ServerMsg> -> Effect<'ServerMsg> ) =
 
-    let config = Configuration.createClusterConfig [name] systemName remotePort seedPort setParams
-    
+    let config = 
+        Configuration.createClusterConfig [name] systemName remotePort seedPort setParams
+
     let clusterSystem = System.create systemName config
 
     let log = clusterSystem.Log

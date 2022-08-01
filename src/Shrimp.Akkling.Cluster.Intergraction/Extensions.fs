@@ -6,7 +6,22 @@ open System.Reflection
 open System
 open System.IO
 open System.Collections.Generic
+open Shrimp.FSharp.Plus
 
+[<RequireQualifiedAccess>]
+module BinaryFile =
+    let private serilizer = Hyperion.Serializer()
+    let serialize (value: obj) (targetPath: BinaryPath) =  
+        use stream = new System.IO.FileStream(targetPath.Path, FileMode.Create)
+        serilizer.Serialize(value, stream)
+        stream.Close()
+        stream.Dispose()
+        BinaryFile(targetPath)
+
+    let deserialize<'v> (file: BinaryFile): 'v =
+        use stream = new System.IO.FileStream(file.Path, FileMode.Open)
+        serilizer.Deserialize(stream)
+        |> unbox
 
 module Configuration = 
     [<RequireQualifiedAccess>]
@@ -246,36 +261,51 @@ connection-string = "%s"
     let setParams_Loggers_Nlog (args: ClusterConfigBuildingArgs) =
         { args with ``akka.loggers`` = Loggers (Set.ofList [Logger.NLog]) }
 
-    let private possibleFolders() = 
+    /// Assembly.GetEntryAssembly().Location </> {part}
+    let private possibleEntryFolderParts() = 
         [ "../Assets"(*UWP*) ] 
+
+    let private registeredPossibleFolders = new HashSet<string>()
+
+    let private possibleFolders() = (List.ofSeq registeredPossibleFolders)
 
 
     [<RequireQualifiedAccess>]
     module Configuration = 
-
+        let RegisterApplicationConfigFolders(paths: string list) =
+            for path in paths do
+                let dir = FsDirectoryInfo.create path
+                registeredPossibleFolders.Add(dir.Path)
+                |> ignore
+            
         let tryCreateByApplicationConfig() =
             let entryAssemblyLocation =
                 try Some (Assembly.GetEntryAssembly().Location)
                 with ex -> None
 
-            match entryAssemblyLocation with 
-            | Some entryAssemblyLocation ->
-                let folder = System.IO.Path.GetDirectoryName(entryAssemblyLocation)
-                let folders = 
-                    [ folder ] 
-                    @ possibleFolders()
-                      |> List.map (fun m -> Path.Combine(folder, m))
+            let folders = 
+                match entryAssemblyLocation with 
+                | Some entryAssemblyLocation ->
+                    let folder = System.IO.Path.GetDirectoryName(entryAssemblyLocation)
+                    let folders = 
+                        [ folder ] 
+                        @ possibleEntryFolderParts()
+                          |> List.map (fun m -> Path.Combine(folder, m))
 
-                folders 
-                |> List.map (fun folder -> Path.Combine(folder, "application.conf"))
-                |> List.tryFind (fun file -> File.Exists(file))
-                |> function
-                    | Some file ->
-                        let texts = File.ReadAllText(file, Text.Encoding.UTF8)
-                        Some (Configuration.parse(texts))
-                    | None -> None
+                    let folders = folders @ possibleFolders()
+                    folders
 
-            | None -> None
+                | None -> possibleFolders()
+
+            folders 
+            |> List.map (fun folder -> Path.Combine(folder, "application.conf"))
+            |> List.tryFind (fun file -> File.Exists(file))
+            |> function
+                | Some file ->
+                    let texts = File.ReadAllText(file, Text.Encoding.UTF8)
+                    Some (Configuration.parse(texts))
+                | None -> None
+
 
         let createLocalConfig (setParams: LocalConfigBuildingArgs -> LocalConfigBuildingArgs) =
             let args = setParams LocalConfigBuildingArgs.DefaultValue
@@ -285,6 +315,15 @@ connection-string = "%s"
                 |> Configuration.parse
 
             config.WithFallback(Akka.Configuration.ConfigurationFactory.Default())
+
+
+        /// application.conf should be copied to target folder
+        let fallBackByApplicationConf config =
+            match tryCreateByApplicationConfig() with 
+            | Some applicationConf ->
+                applicationConf.WithFallback(config)
+
+            | None -> config
 
         let internal createClusterConfig (roles: string list) systemName remotePort seedPort (setParams: ClusterConfigBuildingArgs -> ClusterConfigBuildingArgs) = 
             let args = setParams ClusterConfigBuildingArgs.DefaultValue
@@ -302,12 +341,4 @@ connection-string = "%s"
                 |> Configuration.parse
 
             config.WithFallback(ClusterSingletonManager.DefaultConfig())
-
-        /// application.conf should be copied to target folder
-        let fallBackByApplicationConf config =
-            match tryCreateByApplicationConfig() with 
-            | Some applicationConf ->
-                applicationConf.WithFallback(config)
-
-            | None -> config
-
+            |> fallBackByApplicationConf

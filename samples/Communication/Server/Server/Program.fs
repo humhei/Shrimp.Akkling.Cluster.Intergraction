@@ -61,15 +61,18 @@ let main argv =
 
     ) |> ignore
 
+    let myFail() =
+        invalidArg "AAA" "BBBB"
+
     Server.create(fun ctx ->
         let rec loop i = actor {
             let! msg = ctx.Receive()
             match msg with 
             | ServerMsg.Plus (input1, input2) ->
                 ctx.Sender() <! (input1 + input2)
-            | ServerMsg.Exp  ->
-                failwith "Exception From ServerMsg_Exp"
-
+            | ServerMsg.Exp  -> myFail()
+                
+                    
             | ServerMsg.Expr (expr) ->
                 let lambda = LeafExpressionConverter.QuotationToLambdaExpression(expr)
                 let r =
