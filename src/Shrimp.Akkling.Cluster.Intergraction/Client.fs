@@ -1,8 +1,12 @@
 ﻿namespace Shrimp.Akkling.Cluster.Intergraction
+
+open Microsoft.FSharp.Quotations
+
 #nowarn "0104"
 open Akkling
 open System
 open Akka.Actor
+open Shrimp.FSharp.Plus
 open Akka.Cluster
 open Akkling.Cluster
 open System.Threading
@@ -17,6 +21,69 @@ open Shrimp.Akkling.Cluster.Intergraction
 
 
 type ClientEndpointsUpdatedEvent = ClientEndpointsUpdatedEvent of Map<Address, RemoteActorReachable * RemoteActor<obj>>
+
+type IDebugServerMsg = interface end
+type IWarningServerMsg = interface end
+type IErrorServerMsg = interface end
+type IInfoServerMsg = interface end
+type IIgnoreServerMsg = interface end
+
+[<RequireQualifiedAccess>]
+type private ServerMsgLoggerLevel =
+    | Debug
+    | Info
+    | Warning
+    | Error
+
+
+[<AutoOpen>]
+module private _ClientUtils =
+    let undef<'T> : 'T = Unchecked.defaultof<_>
+
+type private ServerMsgLoggerLevels<'ServerMsg> = ServerMsgLoggerLevels of ServerMsgLoggerLevel list
+with 
+    static member Create() =
+        let tp = typeof<'ServerMsg>
+        
+        let (|TypeDef|_|) (typeExpr:Expr) (tp:System.Type) =
+            let typeDef = typeExpr.Type.GetGenericTypeDefinition()
+            match typeDef.IsAssignableFrom(tp) with 
+            | true -> Some ()
+            | false -> None
+
+        match tp with 
+        | TypeDef <@ undef<IIgnoreServerMsg> @> -> []
+        | _ ->
+            [
+                typeof<IDebugServerMsg> => ServerMsgLoggerLevel.Debug
+                typeof<IInfoServerMsg>  => ServerMsgLoggerLevel.Info
+                typeof<IWarningServerMsg> => ServerMsgLoggerLevel.Warning
+                typeof<IErrorServerMsg> => ServerMsgLoggerLevel.Error
+            ]
+            |> List.choose(fun (typeDef, logger) ->
+                match typeDef.IsAssignableFrom(tp) with 
+                | true -> Some logger
+                | false -> None
+            )
+        |> ServerMsgLoggerLevels
+
+[<AutoOpen>]
+module private _ServerMsgLoggerLevelsExtensions =
+    type ILoggingAdapter with 
+        member private logger.Log(loggerLevel, msg) =
+            match loggerLevel with 
+            | ServerMsgLoggerLevel.Debug ->   logger.Debug(msg)
+            | ServerMsgLoggerLevel.Info ->    logger.Info(msg)
+            | ServerMsgLoggerLevel.Warning -> logger.Warning(msg)
+            | ServerMsgLoggerLevel.Error ->   logger.Error(msg)
+            
+        member logger.Log(loggerLevels, msg) =
+            let (ServerMsgLoggerLevels loggerLevels) = loggerLevels
+            loggerLevels
+            |> List.sort
+            |> List.iter(fun loggerLevel ->
+                logger.Log(loggerLevel, msg)
+            )
 
 [<RequireQualifiedAccess>]
 type RemoteJob<'ServerMsg> = 
@@ -197,6 +264,8 @@ module internal Client =
                     RemoteActorManager.createAgent seedNodes clusterSystem serverRoleName
 
                 let emptyAskingInfos:  list<AskingInfo<'ServerMsg>> = list.Empty
+                let serverMsgLoggerLevels = 
+                    ServerMsgLoggerLevels.Create<'ServerMsg>()
 
                 spawn clusterSystem name (props (fun ctx ->
 
@@ -303,8 +372,7 @@ module internal Client =
 
                             (remoteServer :> ICanTell<_>).Underlying.Tell(msg, untyped ctx.Self)
                             //(remoteServer :> ICanTell<_>).Underlying.Tell(msg, untyped ctx.Self)
-
-                            log.Info (sprintf "[CLIENT] [CancelableAsk] Add ask task %O %O" askingInfo.RemoteActorAddress askingInfo.Guid)
+                            log.Log(serverMsgLoggerLevels, (sprintf "[CLIENT] [CancelableAsk] Add ask task %O %O" askingInfo.RemoteActorAddress askingInfo.Guid))
 
                             return! loop (askingInfo :: askingInfos)
 
@@ -323,7 +391,7 @@ module internal Client =
                                     timer.Dispose()
                                 | None -> ()
 
-                                log.Info (sprintf "[CLIENT] [CancelableAsk] Receive response %O from remote server %O \n of %O" value sender.Path.Address askingInfo.ServerMsg)
+                                log.Log(serverMsgLoggerLevels, (sprintf "[CLIENT] [CancelableAsk] Receive response %O from remote server %O \n of %O" value sender.Path.Address askingInfo.ServerMsg))
                                 remoteActorManager <! EndpointMsg.AddServer { Address = askingInfo.RemoteActorAddress; Role = serverRoleName }
                                 askingInfo.Sender <! Response.Success value
 
