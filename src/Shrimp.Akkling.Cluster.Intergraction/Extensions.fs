@@ -201,6 +201,7 @@ connection-string = "%s"
           ``akka.actor.serialization-settings``: ActorSerializationSettings
           //``akka.remote.DotNetty-netty.tcp.public-hostname``: string
           ``akka.remote.dot-netty.tcp.hostname``: string
+          ``akka.remote.dot-netty.tcp.seedingHostName``: string
           /// -----------------------------------------------Additional configurations
           ``akka.cluster.auto-down-unreachable-after``: string
           ``akka.cluster.clientToUnreachableServer-max-ask-time``: string
@@ -219,6 +220,7 @@ connection-string = "%s"
               ``akka.actor.serialization-bindings`` = ActorSerializationBindings (dict [typeof<obj>, ActorSerializer.Hyperion])
               ``akka.actor.serialization-settings`` = { KnownTypeProvider = None }
               ``akka.remote.dot-netty.tcp.hostname`` = "localhost"
+              ``akka.remote.dot-netty.tcp.seedingHostName`` = "localhost"
               ``akka.cluster.auto-down-unreachable-after`` = "60s"
               ``akka.cluster.clientToUnreachableServer-max-ask-time`` = "60s"
               ``akka.cluster.client-ask-retry-count`` = 0
@@ -249,6 +251,7 @@ connection-string = "%s"
                 yield (x.``akka.loggers``).GetConfigurationText() 
                 yield sprintf "akka.remote.dot-netty.tcp.public-hostname = %s" x.``akka.remote.dot-netty.tcp.hostname``
                 yield sprintf "akka.remote.dot-netty.tcp.hostname = %s" x.``akka.remote.dot-netty.tcp.hostname``
+                yield sprintf "akka.remote.dot-netty.tcp.seedingHostName = %s" x.``akka.remote.dot-netty.tcp.seedingHostName``
                 yield sprintf "akka.cluster.auto-down-unreachable-after = %s" x.``akka.cluster.auto-down-unreachable-after``
                 yield sprintf "akka.cluster.clientToUnreachableServer-max-ask-time = %s" x.``akka.cluster.clientToUnreachableServer-max-ask-time``
                 yield sprintf "akka.cluster.client-ask-retry-count = %d" x.``akka.cluster.client-ask-retry-count``
@@ -272,6 +275,7 @@ connection-string = "%s"
 
     [<RequireQualifiedAccess>]
     module Configuration = 
+
         let RegisterApplicationConfigFolders(paths: string list) =
             for path in paths do
                 let dir = FsDirectoryInfo.create path
@@ -325,20 +329,41 @@ connection-string = "%s"
 
             | None -> config
 
-        let internal createClusterConfig (roles: string list) systemName remotePort seedPort (setParams: ClusterConfigBuildingArgs -> ClusterConfigBuildingArgs) = 
-            let args = setParams ClusterConfigBuildingArgs.DefaultValue
+        let private createClusterConfig_Final (roles: string list) systemName remotePort seedPort (args: ClusterConfigBuildingArgs) = 
         
             let config =
                 let text1 = args.GetConfigurationText()
                 let text2 = 
                     [ yield "akka.actor.provider = cluster"
                       yield sprintf "akka.remote.dot-netty.tcp.port = %d" remotePort 
-                      yield sprintf """akka.cluster.seed-nodes = [ "akka.tcp://%s@%s:%d/" ]""" systemName args.``akka.remote.dot-netty.tcp.hostname`` seedPort 
+                      yield sprintf """akka.cluster.seed-nodes = [ "akka.tcp://%s@%s:%d/" ]""" systemName args.``akka.remote.dot-netty.tcp.seedingHostName`` seedPort 
                       yield sprintf "akka.cluster.roles = [%s]" (Hocon.toTextInSquareBrackets roles)
-                    ] |> String.concat "\n"
+                    ] |> String.concat "\n" 
 
                 text1 + "\n" + text2
                 |> Configuration.parse
 
+            let m = config.ToString()
+
             config.WithFallback(ClusterSingletonManager.DefaultConfig())
             |> fallBackByApplicationConf
+
+        let internal createClusterConfig (roles: string list) systemName remotePort seedPort (setParams: ClusterConfigBuildingArgs -> ClusterConfigBuildingArgs) = 
+            let args = setParams ClusterConfigBuildingArgs.DefaultValue
+        
+            let config =
+                args.GetConfigurationText()
+                |> Configuration.parse
+
+            let config = 
+                config.WithFallback(ClusterSingletonManager.DefaultConfig())
+                |> fallBackByApplicationConf
+
+
+            let args = 
+                { args with 
+                    ``akka.remote.dot-netty.tcp.seedingHostName``= 
+                        config.GetString("akka.remote.dot-netty.tcp.seedingHostName")
+                }
+
+            createClusterConfig_Final roles systemName remotePort seedPort args

@@ -22,68 +22,77 @@ open Shrimp.Akkling.Cluster.Intergraction
 
 type ClientEndpointsUpdatedEvent = ClientEndpointsUpdatedEvent of Map<Address, RemoteActorReachable * RemoteActor<obj>>
 
-type IDebugServerMsg = interface end
-type IWarningServerMsg = interface end
-type IErrorServerMsg = interface end
-type IInfoServerMsg = interface end
-type IIgnoreServerMsg = interface end
-
-[<RequireQualifiedAccess>]
-type private ServerMsgLoggerLevel =
-    | Debug
-    | Info
-    | Warning
-    | Error
 
 
-[<AutoOpen>]
-module private _ClientUtils =
-    let undef<'T> : 'T = Unchecked.defaultof<_>
+module ServerMsgLoggerLevel =
+    type IDebugServerMsg = interface end
+    type IWarningServerMsg = interface end
+    type IErrorServerMsg = interface end
+    type IInfoServerMsg = interface end
+    type IIgnoreServerMsg = interface end
 
-type private ServerMsgLoggerLevels<'ServerMsg> = ServerMsgLoggerLevels of ServerMsgLoggerLevel list
-with 
-    static member Create() =
-        let tp = typeof<'ServerMsg>
-        
-        let (|TypeDef|_|) (typeExpr:Expr) (tp:System.Type) =
-            let typeDef = typeExpr.Type.GetGenericTypeDefinition()
-            match typeDef.IsAssignableFrom(tp) with 
-            | true -> Some ()
-            | false -> None
+    [<AutoOpen>]
+    module private _ClientUtils =
+        let undef<'T> : 'T = Unchecked.defaultof<_>
+    
+    
+    [<RequireQualifiedAccess>]
+    type internal ServerMsgLoggerLevel =
+        | Debug
+        | Info
+        | Warning
+        | Error
+    
 
-        match tp with 
-        | TypeDef <@ undef<IIgnoreServerMsg> @> -> []
-        | _ ->
-            [
-                typeof<IDebugServerMsg> => ServerMsgLoggerLevel.Debug
-                typeof<IInfoServerMsg>  => ServerMsgLoggerLevel.Info
-                typeof<IWarningServerMsg> => ServerMsgLoggerLevel.Warning
-                typeof<IErrorServerMsg> => ServerMsgLoggerLevel.Error
-            ]
-            |> List.choose(fun (typeDef, logger) ->
-                match typeDef.IsAssignableFrom(tp) with 
-                | true -> Some logger
-                | false -> None
-            )
-        |> ServerMsgLoggerLevels
-
-[<AutoOpen>]
-module private _ServerMsgLoggerLevelsExtensions =
-    type ILoggingAdapter with 
-        member private logger.Log(loggerLevel, msg) =
-            match loggerLevel with 
-            | ServerMsgLoggerLevel.Debug ->   logger.Debug(msg)
-            | ServerMsgLoggerLevel.Info ->    logger.Info(msg)
-            | ServerMsgLoggerLevel.Warning -> logger.Warning(msg)
-            | ServerMsgLoggerLevel.Error ->   logger.Error(msg)
+    type internal ServerMsgLoggerLevels<'ServerMsg> = ServerMsgLoggerLevels of ServerMsgLoggerLevel list
+    with 
+        static member Create() =
+            let tp = typeof<'ServerMsg>
             
-        member logger.Log(loggerLevels, msg) =
-            let (ServerMsgLoggerLevels loggerLevels) = loggerLevels
-            loggerLevels
-            |> List.sort
-            |> List.iter(fun loggerLevel ->
-                logger.Log(loggerLevel, msg)
-            )
+            let (|TypeDef|_|) (typeExpr:Expr) (tp:System.Type) =
+                let typeDef = typeExpr.Type
+                match typeDef.IsAssignableFrom(tp) with 
+                | true -> Some ()
+                | false -> None
+    
+            match tp with 
+            | TypeDef <@ undef<IIgnoreServerMsg> @> -> []
+            | _ ->
+                [
+                    typeof<IDebugServerMsg> => ServerMsgLoggerLevel.Debug
+                    typeof<IInfoServerMsg>  => ServerMsgLoggerLevel.Info
+                    typeof<IWarningServerMsg> => ServerMsgLoggerLevel.Warning
+                    typeof<IErrorServerMsg> => ServerMsgLoggerLevel.Error
+                ]
+                |> List.choose(fun (typeDef, logger) ->
+                    match typeDef.IsAssignableFrom(tp) with 
+                    | true -> Some logger
+                    | false -> None
+                )
+            |> ServerMsgLoggerLevels
+    
+    [<AutoOpen>]
+    module internal _ServerMsgLoggerLevelsExtensions =
+        type ILoggingAdapter with 
+            member private logger.Log(loggerLevel, msg) =
+                match loggerLevel with 
+                | ServerMsgLoggerLevel.Debug ->   logger.Debug(msg)
+                | ServerMsgLoggerLevel.Info ->    logger.Info(msg)
+                | ServerMsgLoggerLevel.Warning -> logger.Warning(msg)
+                | ServerMsgLoggerLevel.Error ->   logger.Error(msg)
+                
+            member logger.Log(loggerLevels, msg) =
+                let (ServerMsgLoggerLevels loggerLevels) = loggerLevels
+                loggerLevels
+                |> List.sort
+                |> List.iter(fun loggerLevel ->
+                    logger.Log(loggerLevel, msg)
+                )
+
+open ServerMsgLoggerLevel
+
+
+
 
 [<RequireQualifiedAccess>]
 type RemoteJob<'ServerMsg> = 
